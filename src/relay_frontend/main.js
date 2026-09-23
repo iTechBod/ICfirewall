@@ -63,7 +63,7 @@ const statProcessed = document.getElementById('stat-processed');
 const statBlocked = document.getElementById('stat-blocked');
 const statQueue = document.getElementById('stat-queue');
 const statStatus = document.getElementById('stat-status');
-const threatTable = document.getElementById('threat-table');
+const threatTbody = document.getElementById('threat-tbody');
 const topbarTime = document.getElementById('topbar-time');
 const modeFeedback = document.getElementById('mode-feedback');
 const coffeeBtn = document.getElementById('coffee-btn');
@@ -124,7 +124,14 @@ function formatTimestamp(timestamp) {
 }
 
 function renderThreats(threats) {
-  const rows = threats.map((event) => `
+  if (!threatTbody) return;
+
+  if (!threats || threats.length === 0) {
+    threatTbody.innerHTML = '<tr><td colspan="4" class="empty-state">No threats recorded.</td></tr>';
+    return;
+  }
+
+  threatTbody.innerHTML = threats.map((event) => `
     <tr>
       <td>${formatTimestamp(event.timestamp)}</td>
       <td>${event.severity}</td>
@@ -132,11 +139,6 @@ function renderThreats(threats) {
       <td>${event.snippet}</td>
     </tr>
   `).join('');
-
-  threatTable.innerHTML = `
-    <tr><th>Time</th><th>Severity</th><th>Threat Type</th><th>Payload Snippet</th></tr>
-    ${rows || '<tr><td colspan="4">No threats recorded.</td></tr>'}
-  `;
 }
 
 async function refreshStats(showFeedback = true) {
@@ -170,7 +172,9 @@ async function refreshThreats() {
     renderThreats(threats);
   } catch (error) {
     console.error('Failed to load threats:', error);
-    threatTable.innerHTML = '<tr><th>Time</th><th>Severity</th><th>Threat Type</th><th>Payload Snippet</th></tr><tr><td colspan="4">Threat feed unavailable.</td></tr>';
+    if (threatTbody) {
+      threatTbody.innerHTML = '<tr><td colspan="4" class="empty-state">Threat feed unavailable.</td></tr>';
+    }
   }
 }
 

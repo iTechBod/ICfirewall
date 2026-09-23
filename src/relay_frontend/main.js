@@ -253,7 +253,7 @@ async function handlePromptSubmit(event) {
     await refreshDashboard(false);
   } catch (error) {
     console.error('Failed to evaluate prompt:', error);
-    chatStatus.textContent = 'Error processing prompt';
+    chatStatus.textContent = `Error processing prompt: ${error?.message || error}`;
   } finally {
     sendPromptBtn.disabled = false;
   }

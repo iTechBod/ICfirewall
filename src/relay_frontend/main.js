@@ -3,9 +3,11 @@ import { Actor, HttpAgent } from 'https://esm.sh/@dfinity/agent';
 const isLocalReplica = window.location.hostname.endsWith('.localhost')
   || window.location.hostname === 'localhost'
   || window.location.hostname === '127.0.0.1';
+
 const CANISTER_ID = isLocalReplica
   ? ''
   : '';
+
 const HOST = isLocalReplica ? 'http://localhost:4943' : 'https://icp0.io';
 
 const idlFactory = ({ IDL }) => {
@@ -23,10 +25,18 @@ const idlFactory = ({ IDL }) => {
     snippet: IDL.Text,
   });
 
+  const PromptResult = IDL.Record({
+    allowed: IDL.Bool,
+    mode: IDL.Text,
+    response: IDL.Text,
+    reason: IDL.Text,
+  });
+
   return IDL.Service({
     getStats: IDL.Func([], [SystemStats], ['query']),
     getThreats: IDL.Func([], [IDL.Vec(ThreatEvent)], ['query']),
     setMode: IDL.Func([IDL.Text], [IDL.Text], []),
+    processPrompt: IDL.Func([IDL.Text], [PromptResult], []),
   });
 };
 
@@ -34,6 +44,7 @@ const agent = new HttpAgent({
   host: HOST,
   verifyQuerySignatures: !isLocalReplica,
 });
+
 if (isLocalReplica) {
   try {
     await agent.fetchRootKey();
@@ -41,6 +52,7 @@ if (isLocalReplica) {
     console.error('Local replica root key unavailable:', error);
   }
 }
+
 const actor = Actor.createActor(idlFactory, {
   agent,
   canisterId: CANISTER_ID,
@@ -54,6 +66,20 @@ const statStatus = document.getElementById('stat-status');
 const threatTable = document.getElementById('threat-table');
 const topbarTime = document.getElementById('topbar-time');
 const modeFeedback = document.getElementById('mode-feedback');
+const coffeeBtn = document.getElementById('coffee-btn');
+const devWebsiteBtn = document.getElementById('dev-website-btn');
+
+// Chat UI Elements
+const chatForm = document.getElementById('chat-form');
+const promptInput = document.getElementById('prompt-input');
+const sendPromptBtn = document.getElementById('send-prompt-btn');
+const chatStatus = document.getElementById('chat-status');
+const chatOutputCard = document.getElementById('chat-output-card');
+const outputBadge = document.getElementById('output-badge');
+const outputModeTag = document.getElementById('output-mode-tag');
+const outputText = document.getElementById('output-text');
+const outputReason = document.getElementById('output-reason');
+
 let modeRequestInFlight = false;
 let dashboardRefreshInFlight = false;
 let dashboardRefreshTimer;
@@ -82,15 +108,8 @@ function updateClock() {
 }
 
 function setButtonState(mode) {
-  const normalized = mode
-    .split(' ')[0]
-    .toLowerCase();
-
-  const buttonModeMap = {
-    off: 'Off',
-    medium: 'Medium',
-    on: 'On',
-  };
+  const normalized = mode.split(' ')[0].toLowerCase();
+  const buttonModeMap = { off: 'Off', medium: 'Medium', on: 'On' };
 
   modeButtons.forEach((button) => {
     const active = button.dataset.mode === buttonModeMap[normalized];
@@ -129,6 +148,7 @@ async function refreshStats(showFeedback = true) {
     statStatus.textContent = stats.mode;
     statStatus.className = 'status-ok';
     setButtonState(stats.mode.replace(/ .*$/, '').trim());
+
     if (showFeedback) {
       setModeFeedback(`Firewall ${stats.mode.split(' ')[0].toLowerCase()} and synced`, 'success');
     } else if (!modeRequestInFlight) {
@@ -188,12 +208,7 @@ async function setMode(mode) {
     statStatus.className = 'status-ok';
     setModeFeedback(`Firewall ${mode.toLowerCase()} applied`, 'success');
 
-    // The update is authoritative. A telemetry refresh should not make a
-    // successful mode change look like a failed one.
     await Promise.allSettled([refreshStats(false), refreshThreats()]);
-    statStatus.textContent = `${mode} boundary`;
-    statStatus.className = 'status-ok';
-    setModeFeedback(`Firewall ${mode.toLowerCase()} applied`, 'success');
   } catch (error) {
     console.error('Failed to update mode:', error);
     statStatus.textContent = 'Sync error';
@@ -205,9 +220,60 @@ async function setMode(mode) {
   }
 }
 
+async function handlePromptSubmit(event) {
+  event.preventDefault();
+  const promptText = promptInput.value.trim();
+  if (!promptText) return;
+
+  sendPromptBtn.disabled = true;
+  chatStatus.textContent = 'Evaluating boundary...';
+
+  try {
+    const result = await actor.processPrompt(promptText);
+
+    chatOutputCard.classList.remove('hidden');
+    outputText.textContent = result.response;
+    outputReason.textContent = `Reason: ${result.reason}`;
+    outputModeTag.textContent = `MODE: ${result.mode.toUpperCase()}`;
+
+    if (result.allowed) {
+      outputBadge.textContent = 'CLEARED';
+      outputBadge.classList.remove('is-blocked');
+    } else {
+      outputBadge.textContent = 'BLOCKED';
+      outputBadge.classList.add('is-blocked');
+    }
+
+    chatStatus.textContent = 'Evaluation complete';
+    promptInput.value = '';
+    await refreshDashboard(false);
+  } catch (error) {
+    console.error('Failed to evaluate prompt:', error);
+    chatStatus.textContent = 'Error processing prompt';
+  } finally {
+    sendPromptBtn.disabled = false;
+  }
+}
+
 function copyPrincipal() {
   navigator.clipboard.writeText('57fkl-hfo3q-4sije-2dfvt-ikhqe-ti54q-ysccf-555lf-zc4bm-nykce-lae');
   alert('Principal copied to clipboard!');
+}
+
+function openDevWebsite() {
+  window.open('https://2n2uw-uaaaa-aaaag-at2hq-cai.icp.net', '_blank', 'noopener,noreferrer');
+}
+
+if (coffeeBtn) {
+  coffeeBtn.addEventListener('click', copyPrincipal);
+}
+
+if (devWebsiteBtn) {
+  devWebsiteBtn.addEventListener('click', openDevWebsite);
+}
+
+if (chatForm) {
+  chatForm.addEventListener('submit', handlePromptSubmit);
 }
 
 modeButtons.forEach((button) => {
@@ -217,8 +283,10 @@ modeButtons.forEach((button) => {
 });
 
 window.copyPrincipal = copyPrincipal;
+window.openDevWebsite = openDevWebsite;
 updateClock();
 window.setInterval(updateClock, 1000);
+
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refreshDashboard(false);
 });

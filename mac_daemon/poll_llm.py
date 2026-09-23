@@ -4,7 +4,6 @@ import re
 import shutil
 import subprocess
 import time
-import uuid
 import getpass
 import requests
 from pathlib import Path
@@ -13,8 +12,9 @@ from pathlib import Path
 DAEMON_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = DAEMON_DIR.parent
 CANISTER_IDS_PATH = PROJECT_ROOT / "canister_ids.json"
+ODYSSEUS_CONFIG_PATH = PROJECT_ROOT / "odysseus_config.json"
 
-DEFAULT_IC_CANISTER_ID = "aaaaa-aa"
+DEFAULT_IC_CANISTER_ID = ""
 
 # Matches standard ICP Principal/Canister ID format
 CANISTER_ID_REGEX = re.compile(r"\b[a-z0-9]{5}(?:-[a-z0-9]{5}){4}\b", re.IGNORECASE)
@@ -37,8 +37,8 @@ def extract_canister_id(raw_input: str) -> str | None:
 def setup_wizard() -> tuple[str, str, dict]:
     """
     Interactive wizard that:
-    1. Auto-parses canister IDs from raw bash/dfx deploy logs.
-    2. Prompts for Odysseus instance credentials & session parameters.
+    1. Parses canister IDs from canister_ids.json or prompt logs.
+    2. Reads and persists Odysseus credentials into odysseus_config.json.
     3. Provisions controller access via dfx.
     """
     print("==================================================")
@@ -59,20 +59,13 @@ def setup_wizard() -> tuple[str, str, dict]:
 
     current_ic_id = data["relay_backend"].get("ic", DEFAULT_IC_CANISTER_ID)
 
-    # 2. Parse Canister ID from bash output
     print(f"\nCurrent configured IC Backend Canister ID: {current_ic_id}")
     print("Paste raw bash / dfx deploy output (or press Enter to keep current):")
     user_input = input("Canister Output > ").strip()
 
     parsed_id = extract_canister_id(user_input)
-    if parsed_id:
-        selected_ic_id = parsed_id
-        print(f"✅ Auto-detected Canister ID: {selected_ic_id}")
-    else:
-        selected_ic_id = current_ic_id
-        print(f"📌 Using default/existing Canister ID: {selected_ic_id}")
+    selected_ic_id = parsed_id if parsed_id else current_ic_id
 
-    # Save updated canister_ids.json
     data["relay_backend"]["ic"] = selected_ic_id
     try:
         with open(CANISTER_IDS_PATH, "w", encoding="utf-8") as f:
@@ -81,25 +74,32 @@ def setup_wizard() -> tuple[str, str, dict]:
     except Exception as e:
         print(f"⚠️ Could not write to canister_ids.json: {e}")
 
-    # 3. Configure Odysseus Credentials
+    # 2. Load or Configure Odysseus Credentials
     print("\n--------------------------------------------------")
     print("         🧠 Odysseus Agent Configuration         ")
     print("--------------------------------------------------")
-    print("💡 Tip: Create a dedicated user on your Odysseus workspace (https://github.com/odysseus-dev/odysseus) for daemon execution.")
 
-    env_url = os.getenv("ODYSSEUS_URL", "http://127.0.0.1:7000")
+    saved_config = {}
+    if ODYSSEUS_CONFIG_PATH.exists():
+        try:
+            with open(ODYSSEUS_CONFIG_PATH, "r", encoding="utf-8") as f:
+                saved_config = json.load(f)
+        except Exception:
+            pass
+
+    env_url = saved_config.get("url", os.getenv("ODYSSEUS_URL", "http://127.0.0.1:7860"))
     odysseus_url = input(f"Odysseus URL [{env_url}]: ").strip() or env_url
 
-    env_user = os.getenv("ODYSSEUS_USERNAME", "")
-    prompt_user = f" [{env_user}]" if env_user else ""
+    env_user = saved_config.get("username", os.getenv("ODYSSEUS_USERNAME", ""))
+    prompt_user = f" [{env_user}]" if env_user else " (leave blank if local auth is disabled)"
     odysseus_user = input(f"Odysseus Username{prompt_user}: ").strip() or env_user
 
-    env_pass = os.getenv("ODYSSEUS_PASSWORD", "")
-    odysseus_pass = getpass.getpass("Odysseus Password: ").strip() or env_pass
+    env_pass = saved_config.get("password", os.getenv("ODYSSEUS_PASSWORD", ""))
+    prompt_pass = " [****]" if env_pass else " (leave blank if local auth is disabled)"
+    odysseus_pass = getpass.getpass(f"Odysseus Password{prompt_pass}: ").strip() or env_pass
 
-    env_session = os.getenv("ODYSSEUS_SESSION_ID", "")
-    default_session = env_session if env_session else str(uuid.uuid4())
-    odysseus_session = input(f"Odysseus Session ID [{default_session}]: ").strip() or default_session
+    env_session = saved_config.get("session_id", os.getenv("ODYSSEUS_SESSION_ID", "53c98808-7af3-4098-80a1-8b74911d6e54"))
+    odysseus_session = input(f"Odysseus Session ID [{env_session}]: ").strip() or env_session
 
     odysseus_config = {
         "url": odysseus_url.rstrip("/"),
@@ -108,14 +108,20 @@ def setup_wizard() -> tuple[str, str, dict]:
         "session_id": odysseus_session
     }
 
-    # 4. Target Network & Controller Registration
+    try:
+        with open(ODYSSEUS_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(odysseus_config, f, indent=2)
+        print(f"💾 Saved configuration to {ODYSSEUS_CONFIG_PATH.name}")
+    except Exception as e:
+        print(f"⚠️ Could not write to odysseus_config.json: {e}")
+
+    # 3. Target Network & Controller Registration
     network = os.getenv("DFX_NETWORK", "ic").lower()
     active_canister_id = selected_ic_id
 
     if network == "local":
         local_id = data["relay_backend"].get("local")
         if local_id:
-            print(f"\n📌 Local replica detected. Using local canister ID: {local_id}")
             active_canister_id = local_id
 
     dfx_bin = shutil.which("dfx") or os.path.expanduser("~/.cache/dfinity/versions/0.24.3/dfx")
@@ -130,8 +136,6 @@ def setup_wizard() -> tuple[str, str, dict]:
             print("✅ Principal controller successfully registered.")
         except Exception as err:
             print(f"⚠️ Note on controller update: {err}")
-    else:
-        print("⚠️ 'dfx' binary not found in standard PATH. Skipping controller registration.")
 
     print("==================================================\n")
     return active_canister_id, network, odysseus_config
@@ -148,91 +152,129 @@ ODYSSEUS_LOG_PATH = os.path.expanduser(os.getenv("ODYSSEUS_LOG_PATH", "~/Desktop
 class OdysseusClient:
     def __init__(self, config: dict):
         self.url = config["url"]
-        self.username = config["username"]
-        self.password = config["password"]
+        self.username = config.get("username", "")
+        self.password = config.get("password", "")
         self.session_id = config["session_id"]
 
-        if not self.username or not self.password:
-            raise RuntimeError("Odysseus credentials (username/password) are required.")
-        
         self.session = requests.Session()
-        print("🔐 Authenticating with Odysseus Agent Backend...")
         
+        # Authenticate if credentials are provided
+        if self.username and self.password:
+            print("🔐 Authenticating with Odysseus Agent Backend...")
+            auth_attempts = [
+                (f"{self.url}/api/v1/auths/signin", {"email": self.username, "password": self.password}),
+                (f"{self.url}/api/v1/auths/signin", {"username": self.username, "password": self.password}),
+                (f"{self.url}/api/auth/login", {"username": self.username, "password": self.password})
+            ]
+
+            authenticated = False
+            for endpoint, payload in auth_attempts:
+                try:
+                    res = self.session.post(endpoint, json=payload, timeout=10)
+                    if res.status_code == 200:
+                        token = res.json().get("token") or res.json().get("access_token")
+                        if token:
+                            self.session.headers.update({"Authorization": f"Bearer {token}"})
+                        authenticated = True
+                        break
+                except Exception:
+                    continue
+
+            if not authenticated:
+                print("⚠️ Authentication skipped/failed. Proceeding unauthenticated (local mode).")
+
         try:
-            login = self.session.post(
-                f"{self.url}/api/auth/login",
-                data={"username": self.username, "password": self.password},
-                timeout=15,
-            )
-            login.raise_for_status()
-        except requests.RequestException:
-            login = self.session.post(
-                f"{self.url}/api/auth/login",
-                json={"username": self.username, "password": self.password, "remember": True},
-                timeout=15,
-            )
-            login.raise_for_status()
+            models = self.session.get(f"{self.url}/api/models", timeout=15)
+            if models.status_code == 200:
+                res_json = models.json()
+                items = res_json.get("items", res_json.get("data", []))
+                if items:
+                    first_item = items[0]
+                    if isinstance(first_item, dict):
+                        self.model = first_item.get("id") or first_item.get("models", ["default"])[0]
+                    else:
+                        self.model = str(first_item)
+                else:
+                    self.model = "default"
+            else:
+                self.model = "default"
+        except Exception:
+            self.model = "default"
 
-        models = self.session.get(f"{self.url}/api/models", timeout=15)
-        models.raise_for_status()
-        items = models.json().get("items", [])
-        
-        if not items or not items[0].get("models"):
-            raise RuntimeError("Odysseus has no active model endpoints configured.")
-            
-        endpoint = items[0]
-        self.endpoint_url = endpoint.get("url", "")
-        self.model = endpoint["models"][0]
-        
-        self._sync_session_mode()
+    def complete(self, prompt: str) -> str:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json",
+            "X-Tz-Offset": "0", 
+            "X-Tz-Name": "UTC"
+        }
 
-    def _sync_session_mode(self):
-        sync_endpoints = [
-            f"{self.url}/api/session/{self.session_id}/mode",
-            f"{self.url}/api/sessions/{self.session_id}/mode",
-            f"{self.url}/api/session/{self.session_id}/config"
+        # Step 1: Broadcast prompt to open browser tab session UI
+        msg_endpoints = [
+            f"{self.url}/api/v1/chats/{self.session_id}/messages",
+            f"{self.url}/api/session/{self.session_id}/messages"
         ]
-        payload = {"mode": "agent", "terminal": True, "auto_execute": True}
-        for ep in sync_endpoints:
+        for msg_ep in msg_endpoints:
             try:
-                res = self.session.post(ep, json=payload, timeout=5)
-                if res.status_code in [200, 204]:
-                    print(f"🎯 Bound session {self.session_id} to agent/terminal mode")
+                self.session.post(
+                    msg_ep,
+                    json={"role": "user", "content": prompt, "session_id": self.session_id, "chat_id": self.session_id},
+                    timeout=3
+                )
+                break
+            except Exception:
+                pass
+
+        # Step 2: Stream agent response payload
+        chat_payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "chat_id": self.session_id,
+            "session_id": self.session_id,
+            "session": self.session_id,
+            "message": prompt,
+            "prompt": prompt,
+            "stream": True,
+            "mode": "agent",
+            "agent_mode": True,
+            "allow_bash": True,
+            "allow_web_search": True,
+            "web_search": True,
+            "auto_execute": True,
+            "tools_enabled": True
+        }
+
+        stream_endpoints = [
+            f"{self.url}/api/chat/completions",
+            f"{self.url}/api/v1/chat/completions",
+            f"{self.url}/api/chat_stream"
+        ]
+
+        response = None
+        for ep in stream_endpoints:
+            try:
+                res = self.session.post(ep, json=chat_payload, headers=headers, timeout=300, stream=True)
+                if res.status_code == 200:
+                    response = res
                     break
             except Exception:
                 continue
 
-    def complete(self, prompt: str) -> str:
-        headers = {"X-Tz-Offset": "0", "X-Tz-Name": "UTC"}
-
-        payload = {
-            "message": prompt,
-            "session": self.session_id,
-            "session_id": self.session_id,
-            "mode": "agent",
-            "agent_mode": "true",
-            "allow_bash": "true",
-            "allow_web_search": "true",
-            "web_search": "true",
-            "deep_search": "true",
-            "use_rag": "true",
-            "auto_execute": "true",
-            "tools_enabled": "true",
-            "enable_tools": "true",
-            "enable_skills": "true",
-            "brain": "active",
-            "brain_mode": "active",
-            "temperature": 0.1
-        }
-
-        response = self.session.post(
-            f"{self.url}/api/chat_stream",
-            data=payload,
-            headers=headers,
-            timeout=300,
-            stream=True
-        )
-        response.raise_for_status()
+        if not response:
+            fallback_payload = {
+                "message": prompt,
+                "session_id": self.session_id,
+                "mode": "agent",
+                "auto_execute": "true"
+            }
+            response = self.session.post(
+                f"{self.url}/api/chat_stream",
+                data=fallback_payload,
+                headers={"X-Tz-Offset": "0"},
+                timeout=300,
+                stream=True
+            )
+            response.raise_for_status()
 
         text_parts = []
         raw_events = []
@@ -247,14 +289,18 @@ class OdysseusClient:
                 raw_events.append(event)
                 content = ""
                 if isinstance(event, dict):
-                    content = (
-                        event.get("content") or 
-                        event.get("text") or 
-                        event.get("delta") or 
-                        event.get("message", {}).get("content", "")
-                    )
-                    if isinstance(content, dict):
-                        content = content.get("content", "") or content.get("text", "")
+                    choices = event.get("choices", [])
+                    if choices and "delta" in choices[0]:
+                        content = choices[0]["delta"].get("content", "")
+                    else:
+                        content = (
+                            event.get("content") or 
+                            event.get("text") or 
+                            event.get("delta") or 
+                            event.get("message", {}).get("content", "")
+                        )
+                        if isinstance(content, dict):
+                            content = content.get("content", "") or content.get("text", "")
                 elif isinstance(event, str):
                     content = event
 
@@ -265,9 +311,20 @@ class OdysseusClient:
                     text_parts.append(data_str)
 
         out = "".join(text_parts).strip()
-        if not out and raw_events:
-            print(f"⚠️ Stream returned raw events without text delta: {raw_events[-1]}")
-            return "Agent executed command sequence."
+        
+        # Step 3: Broadcast assistant reply back to browser UI
+        if out:
+            for msg_ep in msg_endpoints:
+                try:
+                    self.session.post(
+                        msg_ep,
+                        json={"role": "assistant", "content": out, "session_id": self.session_id, "chat_id": self.session_id},
+                        timeout=3
+                    )
+                    break
+                except Exception:
+                    pass
+
         return out if out else "Task completed by Odysseus Agent."
 
 
@@ -335,10 +392,8 @@ def main():
                     continue
 
                 if reply:
-                    clean_reply = reply.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
-                    candid_arg = f'("{clean_reply}")'
-                    
-                    call_canister("saveResult", candid_arg)
+                    clean_reply = json.dumps(reply)
+                    call_canister("saveResult", f"({clean_reply})")
                     print("⚡ Result saved back to canister.")
                     notify_odysseus(clean_prompt, reply)
 

@@ -1,0 +1,34 @@
+# --- Odysseus Framework & Local AI Agent Bridge ---
+# Installs directly from the official repository
+git+https://github.com/odysseus-dev/odysseus.git#egg=odysseus
+websockets>=12.0               # Dynamic IPC and real-time agent communications
+aiohttp>=3.9.0                # Async HTTP client for background polling scripts
+
+# --- ICP & Canister Development (PyICP / DFX Interop) ---
+ic-py>=1.0.0                  # Python agent library for interacting with Internet Computer canisters
+cbor2>=5.4.0                  # CBOR encoding/decoding for ICP candid/canister payloads
+ecdsa>=0.18.0                 # Elliptic curve signatures for ICP identity management
+ed25519>=1.5.0                # Key generation and signing for Internet Identity / PEM keys
+
+# --- Local LLM & AI Inference Dependencies ---
+ollama>=0.1.0                 # Python client for local LLM inference (Radeon RX 580 / Vulkan)
+torch>=2.0.0                  # Deep learning framework base for local models
+transformers>=4.38.0          # HuggingFace transformers library for tokenization and model handling
+accelerate>=0.27.0            # Optimizes hardware execution for PyTorch backends
+
+# --- API & Security Filtering (Boundary Modes) ---
+pydantic>=2.6.0               # Data validation and payload schema enforcement
+fastapi>=0.109.0              # Async web framework for local boundary gateway APIs
+uvicorn>=0.27.0               # ASGI server worker for running local API boundaries
+regex>=2023.12.25             # Advanced regex engine for strict prompt injection sanitization
+
+# --- iOS Shortcuts & Pythonista Automation Helpers ---
+requests>=2.31.0              # Synchronous HTTP library for external API fetching
+httpx>=0.27.0                 # Async HTTP client for streaming LLM responses
+python-dotenv>=1.0.0          # Load environment variables from .env files
+Pillow>=10.2.0                # Image processing helper for automated media workflows
+
+# --- Code Formatting & Security Linting ---
+black>=24.1.0                 # Python code formatter
+flake8>=7.0.0                 # Code style enforcer
+bandit>=1.7.7                 # Security linter for detecting vulnerability patterns in Python code

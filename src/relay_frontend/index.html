@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Firewall Command Center</title>
+    <title>ICfirewall Command Center</title>
     <meta name="theme-color" content="#08090c">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -12,17 +12,140 @@
     <div class="ambient ambient-two"></div>
     <main class="shell">
         <header class="topbar">
-            <a class="brand" href="/" aria-label="Relay Command Center"><span class="brand-mark"><span></span></span><span><strong>Relay</strong><small>COMMAND CENTER</small></span></a>
-            <div class="topbar-meta"><span class="topbar-time" id="topbar-time">--:--:--</span></div>
+            <a class="brand" href="/" aria-label="ICfirewall Command Center">
+                <span class="brand-mark"><span></span></span>
+                <span><strong>ICfirewall</strong><small>COMMAND CENTER</small></span>
+            </a>
+            <div class="topbar-meta">
+                <button class="network-pill interactive-btn" id="dev-website-btn" type="button">
+                    <span>Dev Website</span>
+                    <span class="mode-arrow">&#8599;</span>
+                </button>
+                <button class="network-pill interactive-btn" id="coffee-btn" type="button">
+                    <span class="pulse-dot"></span>
+                    <span>Buy me a coffee</span>
+                </button>
+                <span class="topbar-time" id="topbar-time">--:--:--</span>
+            </div>
         </header>
+
         <section class="hero-row">
-            <div class="hero-copy"><p class="eyebrow"><span class="eyebrow-line"></span> ZERO-TRUST RELAY</p><h1>Keep every prompt<br><em>inside the line.</em></h1><p class="hero-description">A quiet perimeter for local intelligence. Watch traffic, tune the firewall, and keep sensitive context on your machine.</p></div>
+            <div class="hero-copy">
+                <p class="eyebrow"><span class="eyebrow-line"></span> ZERO-TRUST RELAY</p>
+                <h1>Keep every prompt<br><em>inside the line.</em></h1>
+                <p class="hero-description">A quiet perimeter for local intelligence. Watch traffic, tune the firewall, and keep sensitive context on your machine.</p>
+            </div>
         </section>
-        <section class="control-panel glass-panel"><div class="panel-heading"><div><p class="section-kicker">FIREWALL POSTURE</p><h2>Choose your boundary</h2></div><span class="lock-glyph" aria-hidden="true">+</span></div><div class="mode-toggles" role="group" aria-label="Firewall mode"><button class="mode-button" data-mode="Off" type="button"><span class="mode-orb orb-off"></span><span><b>Off</b><small>Uncensored</small></span><span class="mode-arrow">&#8599;</span></button><button class="mode-button active" data-mode="Medium" type="button"><span class="mode-orb orb-medium"></span><span><b>Medium</b><small>Guarded</small></span><span class="mode-arrow">&#8599;</span></button><button class="mode-button" data-mode="On" type="button"><span class="mode-orb orb-on"></span><span><b>On</b><small>Locked down</small></span><span class="mode-arrow">&#8599;</span></button></div><p id="mode-feedback" class="mode-feedback" role="status" aria-live="polite">Syncing firewall posture...</p></section>
-        <section class="stats-grid" aria-label="Relay statistics"><article class="stat-card glass-panel stat-primary"><div class="stat-top"><span>PROCESSED</span><span class="stat-icon">&#8593;</span></div><p id="stat-processed">0</p><small>prompts evaluated</small></article><article class="stat-card glass-panel stat-danger"><div class="stat-top"><span>BLOCKED</span><span class="stat-icon">&#9679;</span></div><p id="stat-blocked">0</p><small>threats contained</small></article><article class="stat-card glass-panel stat-warm"><div class="stat-top"><span>QUEUE</span><span class="stat-icon">&#8943;</span></div><p id="stat-queue">0</p><small>awaiting local model</small></article><article class="stat-card glass-panel stat-status-card"><div class="stat-top"><span>STATUS</span><span class="status-ring"></span></div><p id="stat-status" class="status-ok">Active</p><small>system health</small></article></section>
-        <section class="threat-section glass-panel"><div class="panel-heading threat-heading"><div><p class="section-kicker">SECURITY TELEMETRY</p><h2>Threat vault</h2></div><span class="vault-count">LAST 10 EVENTS</span></div><div class="table-wrap"><table id="threat-table"><thead><tr><th>Time</th><th>Severity</th><th>Threat type</th><th>Payload snippet</th></tr></thead><tbody><tr><td colspan="4" class="empty-state">No threats recorded.</td></tr></tbody></table></div></section>
-        <footer class="footer-bar"><a class="footer-brand" href="https://internetcomputer.org" target="_blank" rel="noopener noreferrer"><img src="assets/icp-logo.svg" alt=""> Built on the Internet Computer</a><span>Private by design</span></footer>
+
+        <section class="control-panel glass-panel">
+            <div class="panel-heading">
+                <div>
+                    <p class="section-kicker">FIREWALL POSTURE</p>
+                    <h2>Choose your boundary</h2>
+                </div>
+                <span class="lock-glyph" aria-hidden="true">+</span>
+            </div>
+            <div class="mode-toggles" role="group" aria-label="Firewall mode">
+                <button class="mode-button" data-mode="Off" type="button">
+                    <span class="mode-orb orb-off"></span>
+                    <span><b>Off</b><small>Uncensored</small></span>
+                    <span class="mode-arrow">&#8599;</span>
+                </button>
+                <button class="mode-button active" data-mode="Medium" type="button">
+                    <span class="mode-orb orb-medium"></span>
+                    <span><b>Medium</b><small>Guarded</small></span>
+                    <span class="mode-arrow">&#8599;</span>
+                </button>
+                <button class="mode-button" data-mode="On" type="button">
+                    <span class="mode-orb orb-on"></span>
+                    <span><b>On</b><small>Locked down</small></span>
+                    <span class="mode-arrow">&#8599;</span>
+                </button>
+            </div>
+            <p id="mode-feedback" class="mode-feedback" role="status" aria-live="polite">Syncing firewall posture...</p>
+        </section>
+
+        <!-- Interactive Web Chat / Playground -->
+        <section class="chat-section glass-panel">
+            <div class="panel-heading">
+                <div>
+                    <p class="section-kicker">LIVE INTERACTION</p>
+                    <h2>Prompt Sandbox</h2>
+                </div>
+                <span class="live-label"><span class="pulse-dot"></span> WEBBOUND</span>
+            </div>
+            <form id="chat-form" class="chat-form">
+                <div class="chat-input-wrap">
+                    <textarea id="prompt-input" rows="3" placeholder="Enter prompt to evaluate against active boundary rules..." required></textarea>
+                </div>
+                <div class="chat-actions">
+                    <span id="chat-status" class="chat-status">Ready</span>
+                    <button id="send-prompt-btn" type="submit" class="network-pill send-btn">
+                        <span>Send Prompt</span>
+                        <span class="mode-arrow">&#8594;</span>
+                    </button>
+                </div>
+            </form>
+            <div id="chat-output-card" class="chat-output-card hidden">
+                <div class="output-header">
+                    <span id="output-badge" class="output-badge">ALLOWED</span>
+                    <span id="output-mode-tag" class="output-mode-tag">MODE: MEDIUM</span>
+                </div>
+                <p id="output-text" class="output-text"></p>
+                <small id="output-reason" class="output-reason"></small>
+            </div>
+        </section>
+
+        <section class="stats-grid" aria-label="Relay statistics">
+            <article class="stat-card glass-panel stat-primary">
+                <div class="stat-top"><span>PROCESSED</span><span class="stat-icon">&#8593;</span></div>
+                <p id="stat-processed">0</p>
+                <small>prompts evaluated</small>
+            </article>
+            <article class="stat-card glass-panel stat-danger">
+                <div class="stat-top"><span>BLOCKED</span><span class="stat-icon">&#9679;</span></div>
+                <p id="stat-blocked">0</p>
+                <small>threats contained</small>
+            </article>
+            <article class="stat-card glass-panel stat-warm">
+                <div class="stat-top"><span>QUEUE</span><span class="stat-icon">&#8943;</span></div>
+                <p id="stat-queue">0</p>
+                <small>awaiting local model</small>
+            </article>
+            <article class="stat-card glass-panel stat-status-card">
+                <div class="stat-top"><span>STATUS</span><span class="status-ring"></span></div>
+                <p id="stat-status" class="status-ok">Active</p>
+                <small>system health</small>
+            </article>
+        </section>
+
+        <section class="threat-section glass-panel">
+            <div class="panel-heading threat-heading">
+                <div>
+                    <p class="section-kicker">SECURITY TELEMETRY</p>
+                    <h2>Threat vault</h2>
+                </div>
+                <span class="vault-count">LAST 10 EVENTS</span>
+            </div>
+            <div class="table-wrap">
+                <table id="threat-table">
+                    <thead>
+                        <tr><th>Time</th><th>Severity</th><th>Threat type</th><th>Payload snippet</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="4" class="empty-state">No threats recorded.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <footer class="footer-bar">
+            <a class="footer-brand" href="https://internetcomputer.org" target="_blank" rel="noopener noreferrer">
+                <img src="assets/icp-logo.svg" alt="Internet Computer Logo"> Built on the Internet Computer
+            </a>
+            <span>Private by design</span>
+        </footer>
     </main>
-    <script type="module" src="main.js?v=17"></script>
+    <script type="module" src="main.js?v=18"></script>
 </body>
 </html>

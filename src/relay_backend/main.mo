@@ -2,6 +2,7 @@ import Time "mo:base/Time";
 import Array "mo:base/Array";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
+import List "mo:base/List";
 
 actor RelayBackend {
 
@@ -19,6 +20,12 @@ actor RelayBackend {
         totalBlocked : Nat;
         activeQueueLength : Nat;
     };
+    public type PromptResult = {
+        allowed : Bool;
+        mode : Text;
+        response : Text;
+        reason : Text;
+    };
 
     public type HeaderField = (Text, Text);
     public type HttpRequest = { method : Text; url : Text; headers : [HeaderField]; body : Blob };
@@ -29,7 +36,8 @@ actor RelayBackend {
     private var totalProcessed : Nat = 0;
     private var totalBlocked : Nat = 0;
     
-    private var pendingPrompt : Text = ""; 
+    // FIFO Queue for multi-prompt processing
+    private var promptQueue : List.List<Text> = List.nil();
     private var latestResponse : Text = "";
     private var responseAvailable : Bool = false;
 
@@ -87,19 +95,44 @@ actor RelayBackend {
         return null;
     };
 
-    public query func getStats() : async SystemStats {
-        let modeText = switch(currentMode) { case(#Off) "OFF"; case(#Medium) "MEDIUM"; case(#On) "ON"; };
-        return { mode = modeText; totalProcessed; totalBlocked; activeQueueLength = if (pendingPrompt == "") 0 else 1 };
+    private func getModeString() : Text {
+        switch(currentMode) { 
+            case(#Off) "OFF"; 
+            case(#Medium) "MEDIUM"; 
+            case(#On) "ON"; 
+        }
     };
 
-    public query func getPendingPrompt() : async Text {
-        pendingPrompt
+    private func enqueuePrompt(item : Text) {
+        promptQueue := List.append(promptQueue, ?(item, List.nil()));
+    };
+
+    private func dequeuePrompt() : Text {
+        switch (promptQueue) {
+            case (null) "";
+            case (?(head, tail)) {
+                promptQueue := tail;
+                head;
+            };
+        };
+    };
+
+    public query func getStats() : async SystemStats {
+        return { 
+            mode = getModeString(); 
+            totalProcessed; 
+            totalBlocked; 
+            activeQueueLength = List.size(promptQueue); 
+        };
+    };
+
+    public shared func getPendingPrompt() : async Text {
+        dequeuePrompt()
     };
 
     public shared func saveResult(result : Text) : async Text {
         latestResponse := result;
         responseAvailable := true;
-        pendingPrompt := "";
         "Result Saved"
     };
 
@@ -118,31 +151,52 @@ actor RelayBackend {
     };
 
     // --- Direct Web Interface Endpoint ---
-    public shared func submitPrompt(textBody : Text) : async Text {
+    public shared func processPrompt(textBody : Text) : async PromptResult {
         totalProcessed += 1;
+        let activeMode = getModeString();
 
         switch (currentMode) {
             case (#On) {
                 logThreat("Execution Lockout", "HIGH", previewText(textBody, 40));
-                return "BLOCKED: System Locked (ON boundary active).";
+                return {
+                    allowed = false;
+                    mode = activeMode;
+                    response = "BLOCKED: System Locked (ON boundary active).";
+                    reason = "Execution Lockout active in ON posture."
+                };
             };
             case (#Medium) {
                 switch (scanForThreats(textBody)) {
                     case (?threat) {
                         logThreat(threat, "CRITICAL", previewText(textBody, 40));
-                        return "BLOCKED: " # threat;
+                        return {
+                            allowed = false;
+                            mode = activeMode;
+                            response = "BLOCKED: " # threat;
+                            reason = threat
+                        };
                     };
                     case (null) { 
-                        pendingPrompt := textBody; 
+                        enqueuePrompt(textBody);
                         latestResponse := ""; 
-                        return "QUEUED";
+                        return {
+                            allowed = true;
+                            mode = activeMode;
+                            response = "QUEUED: Prompt forwarded to Odysseus agent queue.";
+                            reason = "Passed security heuristic filters."
+                        };
                     };
                 };
             };
             case (#Off) { 
-                pendingPrompt := textBody; 
+                enqueuePrompt(textBody);
                 latestResponse := ""; 
-                return "QUEUED";
+                return {
+                    allowed = true;
+                    mode = activeMode;
+                    response = "QUEUED: Prompt forwarded to Odysseus agent queue.";
+                    reason = "Firewall posture disabled."
+                };
             };
         };
     };
@@ -158,22 +212,22 @@ actor RelayBackend {
         return results;
     };
 
-    // --- HTTP Gateway ---
+    // --- HTTP Gateway for iOS Shortcuts and Raw HTTP Clients ---
     public query func http_request(req : HttpRequest) : async HttpResponse {
-        if (req.method == "POST") {
+        if (req.method == "POST" or req.method == "OPTIONS") {
             return { status_code = 200; headers = []; body = Blob.fromArray([]); upgrade = ?true };
         };
         
-        if (req.method == "GET" and req.url == "/api/queue") {
+        if (req.method == "GET" and (req.url == "/api/queue" or req.url == "/api/queue/")) {
             return {
                 status_code = 200;
-                headers = [("Content-Type", "text/plain; charset=utf-8"), ("Cache-Control", "no-store")];
-                body = Text.encodeUtf8(pendingPrompt);
-                upgrade = ?false;
+                headers = [];
+                body = Blob.fromArray([]);
+                upgrade = ?true;
             };
         };
 
-        if (req.method == "GET" and req.url == "/api/response") {
+        if (req.method == "GET" and (req.url == "/api/response" or req.url == "/api/response/")) {
             return {
                 status_code = 200;
                 headers = [];
@@ -186,61 +240,84 @@ actor RelayBackend {
     };
 
     public shared func http_request_update(req : HttpRequest) : async HttpResponse {
-        if (req.method == "GET" and req.url == "/api/response") {
+        let corsHeaders = [
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "POST, GET, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type"),
+            ("Cache-Control", "no-store, no-cache, must-revalidate")
+        ];
+
+        if (req.method == "OPTIONS") {
+            return { status_code = 204; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?false };
+        };
+
+        if (req.method == "GET" and (req.url == "/api/queue" or req.url == "/api/queue/")) {
+            let nextItem = dequeuePrompt();
+            return {
+                status_code = 200;
+                headers = corsHeaders;
+                body = Text.encodeUtf8(nextItem);
+                upgrade = ?false;
+            };
+        };
+
+        if (req.method == "GET" and (req.url == "/api/response" or req.url == "/api/response/")) {
             let resp = if (responseAvailable) latestResponse else "";
             latestResponse := "";
             responseAvailable := false;
 
             return {
                 status_code = 200;
-                headers = [
-                    ("Content-Type", "text/plain; charset=utf-8"),
-                    ("Cache-Control", "no-store, no-cache, must-revalidate"),
-                    ("Access-Control-Allow-Origin", "*")
-                ];
+                headers = corsHeaders;
                 body = Text.encodeUtf8(resp);
                 upgrade = ?false;
             };
         };
 
-        let decodedBody = Text.decodeUtf8(req.body);
-
-        switch (decodedBody) {
-            case (?textBody) {
-                if (req.url == "/api/prompt") {
-                    totalProcessed += 1;
-
-                    switch (currentMode) {
-                        case (#On) {
-                            logThreat("Execution Lockout", "HIGH", previewText(textBody, 40));
-                            return { status_code = 403; headers = []; body = Text.encodeUtf8("System Locked."); upgrade = ?false };
-                        };
-                        case (#Medium) {
-                            switch (scanForThreats(textBody)) {
-                                case (?threat) {
-                                    logThreat(threat, "CRITICAL", previewText(textBody, 40));
-                                    return { status_code = 406; headers = []; body = Text.encodeUtf8("Blocked by Medium Firewall."); upgrade = ?false };
-                                };
-                                case (null) { pendingPrompt := textBody; latestResponse := ""; };
-                            };
-                        };
-                        case (#Off) { pendingPrompt := textBody; latestResponse := ""; };
-                    };
-                    return { status_code = 200; headers = []; body = Text.encodeUtf8("Queued"); upgrade = ?false };
-                };
-
-                if (req.url == "/api/result") {
-                    latestResponse := textBody;
-                    responseAvailable := true;
-                    pendingPrompt := "";
-                    return { status_code = 200; headers = []; body = Text.encodeUtf8("Result Saved"); upgrade = ?false };
-                };
-            };
-            case (null) {
-                return { status_code = 400; headers = []; body = Text.encodeUtf8("Invalid UTF-8"); upgrade = ?false };
-            };
+        let decodedBody = switch (Text.decodeUtf8(req.body)) {
+            case (?t) t;
+            case (null) "";
         };
 
-        return { status_code = 404; headers = []; body = Text.encodeUtf8("Not Found"); upgrade = ?false };
+        if (req.url == "/api/prompt" or req.url == "/api/prompt/") {
+            if (decodedBody == "") {
+                return { status_code = 400; headers = corsHeaders; body = Text.encodeUtf8("Error: Empty Body"); upgrade = ?false };
+            };
+
+            totalProcessed += 1;
+
+            switch (currentMode) {
+                case (#On) {
+                    logThreat("Execution Lockout", "HIGH", previewText(decodedBody, 40));
+                    return { status_code = 403; headers = corsHeaders; body = Text.encodeUtf8("BLOCKED: System Locked."); upgrade = ?false };
+                };
+                case (#Medium) {
+                    switch (scanForThreats(decodedBody)) {
+                        case (?threat) {
+                            logThreat(threat, "CRITICAL", previewText(decodedBody, 40));
+                            return { status_code = 406; headers = corsHeaders; body = Text.encodeUtf8("BLOCKED: " # threat); upgrade = ?false };
+                        };
+                        case (null) { 
+                            enqueuePrompt(decodedBody); 
+                            latestResponse := ""; 
+                        };
+                    };
+                };
+                case (#Off) { 
+                    enqueuePrompt(decodedBody); 
+                    latestResponse := ""; 
+                };
+            };
+
+            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8("QUEUED"); upgrade = ?false };
+        };
+
+        if (req.url == "/api/result" or req.url == "/api/result/") {
+            latestResponse := decodedBody;
+            responseAvailable := true;
+            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8("Result Saved"); upgrade = ?false };
+        };
+
+        return { status_code = 404; headers = corsHeaders; body = Text.encodeUtf8("Not Found"); upgrade = ?false };
     };
 };

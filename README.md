@@ -9,7 +9,9 @@ ICfirewall is a lightweight, privacy-first command center designed to monitor lo
 ⚬	Threat Vault: View recent security events and payload snippets in a dynamic dashboard table.
 ⚬	On-Chain Coffee Support: Quickly copy the developer’s Principal ID to send ICP tips.
 ⚬	Dev Link: Direct external link to the hosted developer site on IC boundary nodes.
+
 🗂️ Project Structure
+
 .
 ├── index.html    # Main user interface & component layout
 ├── main.js       # Frontend logic, Canister actor connection, & event listeners

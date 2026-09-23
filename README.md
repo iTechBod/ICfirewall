@@ -55,4 +55,9 @@ dfx deploy
 Run any standard local web server or open index.html directly in a browser connected to your local agent.
 
 
-    4.Make a shortcut on your iPhone or 
+    4.Make a shortcut on your iPhone
+	here's a ready to use one (add backend canister id) https://www.icloud.com/shortcuts/f4dd4bd3ffd04ff4a19e82f5a7113ba8
+	if you wanna make it manually:
+	add an action named ask for input,then in the next action add get contents of url, in the url type [https://YOUR BACKEND CANISTER ID.raw.icp0.io/api/prompt] and click the arrow to expand on the action, select method as post, add headers and in key type Authorization, in value type Bearer cyber-dolphin-2026 and change file to privded input
+
+	and if you don't got iPhone just use the inside web prompt chat, have fun!

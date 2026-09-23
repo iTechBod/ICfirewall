@@ -18,26 +18,7 @@ ICfirewall is a lightweight, privacy-first command center designed to monitor lo
 
 🛠️ How to Customize & Update the Code
 If you want to edit or add new features without breaking existing functionality, follow these step-by-step instructions.
-1. Updating the Principal ID (Buy Me a Coffee)
-If you want to change the receiving wallet/principal address for tips:
-	1.	Open main.js.
-	2.	Locate the copyPrincipal() function:
-function copyPrincipal() {
-  navigator.clipboard.writeText('YOUR-NEW-PRINCIPAL-ID-HERE');
-  alert('Principal copied to clipboard!');
-}
-
-	3.	Replace the string inside writeText('...') with your actual ICP Principal ID.
-2. Updating the Developer Website URL
-To change the target link when clicking the Dev Website button:
-	1.	Open main.js.
-	2.	Locate the openDevWebsite() function:
-function openDevWebsite() {
-  window.open('https://YOUR-CANISTER-ID.icp.net', '_blank', 'noopener,noreferrer');
-}
-
-	3.	Replace the URL with your desired website address.
-3. Connecting Your Own Canister Backend
+1. Connecting Your Own Canister Backend
 When you deploy your smart contract (canister), you need to link main.js to it:
 	1.	Open main.js.
 	2.	Find CANISTER_ID:
@@ -45,7 +26,7 @@ const CANISTER_ID = isLocalReplica
   ? 'YOUR-LOCAL-CANISTER-ID'
   : 'YOUR-PRODUCTION-CANISTER-ID';
 
-	3.	Paste your generated Canister IDs inside the single quotes.
+	2.	Paste your generated Canister IDs inside the single quotes.
 🤖 How to Prompt AI for Code Changes
 When working with ChatGPT, Claude, or Gemini to modify this project, use clear, precise instructions. Here are exact templates you can use:
 Example 1: Adding a New Button

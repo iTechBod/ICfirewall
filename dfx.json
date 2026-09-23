@@ -1,0 +1,24 @@
+{
+  "canisters": {
+    "relay_backend": {
+      "main": "src/relay_backend/main.mo",
+      "type": "motoko"
+    },
+    "relay_frontend": {
+      "dependencies": ["relay_backend"],
+      "source": ["src/relay_frontend"],
+      "type": "assets"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  },
+  "networks": {
+    "ic": {
+      "providers": ["https://icp0.io"],
+      "type": "persistent"
+    }
+  }
+}

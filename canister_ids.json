@@ -1,0 +1,10 @@
+{
+  "relay_backend": {
+    "ic": "",
+    "local": ""
+  },
+  "relay_frontend": {
+    "ic": "",
+    "local": ""
+  }
+}

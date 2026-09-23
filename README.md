@@ -53,3 +53,6 @@ dfx deploy
 
 	3.	Serve frontend:
 Run any standard local web server or open index.html directly in a browser connected to your local agent.
+
+
+    4.Make a shortcut on your iPhone or 

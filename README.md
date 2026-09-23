@@ -61,3 +61,39 @@ Run any standard local web server or open index.html directly in a browser conne
 	add an action named ask for input,then in the next action add get contents of url, in the url type [https://YOUR BACKEND CANISTER ID.raw.icp0.io/api/prompt] and click the arrow to expand on the action, select method as post, add headers and in key type Authorization, in value type Bearer cyber-dolphin-2026 and change file to privded input
 
 	and if you don't got iPhone just use the inside web prompt chat, have fun!
+
+
+off,medium and on boundry button limitations:
+## Security Boundary Modes & Limitations
+
+The application uses three boundary modes to manage incoming/outgoing AI prompts and model responses. Below are the functional and performance limitations for each mode.
+
+---
+
+### 1. Boundary OFF (`orb-off`)
+*Disables active filtering and safety interventions.*
+
+* **Zero Input/Output Sanitization:** Bypasses all prompt-injection checks, strict content filtering, and structural validation.
+* **Increased System Vulnerability:** Leaves the downstream AI processing pipeline exposed to adversarial prompt injections, system prompt leaking, and jailbreak payloads.
+* **Visual Ambiguity:** In the default UI, selecting "Off" highlights the active button in cyan, which can visually misrepresent an insecure state as an active safety feature.
+* **No Safety Fallbacks:** Failures or malicious outputs from model responses will render directly into the user interface without defensive masking.
+
+---
+
+### 2. Boundary MEDIUM (`orb-medium`)
+*Balanced filtering designed for general use and basic abuse prevention.*
+
+* **False Positives on Technical Jargon:** May accidentally flag or block legitimate technical terms, security code snippets, or system logs that resemble exploit payloads.
+* **Latency Overhead:** Introduces slight processing delay (roughly 50–150ms) to inspect payloads before forwarding them to the execution layer.
+* **Heuristic Blind Spots:** Relies on lightweight pattern matching and static heuristics, which can miss complex, multi-turn, or deeply obfuscated prompt injections.
+* **Partial Output Redaction:** May strip formatting or partial context out of model outputs when suspicious patterns are detected.
+
+---
+
+### 3. Boundary ON (`orb-on`)
+*Strict validation mode for high-security environments.*
+
+* **High Strictness & Reduced Utility:** Frequently blocks edge-case inputs, developer queries, and raw code snippets due to aggressive regex and semantic containment.
+* **Noticeable Processing Latency:** Runs full validation passes on both input queries and output responses, increasing end-to-end response times.
+* **Potential Response Truncation:** Outputs with high entropy, dynamic formatting, or uncommon characters may trigger automated safety blocks mid-generation.
+* **Strict Character Limits:** Restricts allowable payload length and character sets, limiting long-form inputs or complex markdown structures.

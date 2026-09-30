@@ -17,6 +17,12 @@
                 <span><strong>ICfirewall</strong><small>COMMAND CENTER</small></span>
             </a>
             <div class="topbar-meta">
+                <div id="auth-container" class="auth-wrapper">
+                    <button class="network-pill interactive-btn" id="auth-btn" type="button">
+                        <span class="pulse-dot" style="background:var(--blue); box-shadow:0 0 14px var(--blue)"></span>
+                        <span id="auth-btn-text">II Passkey Login</span>
+                    </button>
+                </div>
                 <button class="network-pill interactive-btn" id="dev-website-btn" type="button">
                     <span>Dev Website</span>
                     <span class="mode-arrow">&#8599;</span>
@@ -37,13 +43,30 @@
             </div>
         </section>
 
-        <section class="control-panel glass-panel">
+        <!-- Unauthenticated Master Claim Panel -->
+        <section class="control-panel glass-panel" id="claim-panel" style="display:none;">
+            <div class="panel-heading">
+                <div>
+                    <p class="section-kicker">SYSTEM INITIALIZATION</p>
+                    <h2>Claim Master Ownership</h2>
+                </div>
+                <span class="lock-glyph" aria-hidden="true">🔑</span>
+            </div>
+            <p style="color:var(--faint); font-size:13px; margin-bottom:14px;">No Master Principal has been assigned to this canister yet. Claim ownership using your logged-in Internet Identity.</p>
+            <button class="network-pill send-btn" id="claim-master-btn" type="button">
+                <span>Claim Master PID Now</span>
+                <span class="mode-arrow">&#8594;</span>
+            </button>
+        </section>
+
+        <!-- Admin Control Panel -->
+        <section class="control-panel glass-panel" id="admin-control-panel" style="display:none;">
             <div class="panel-heading">
                 <div>
                     <p class="section-kicker">FIREWALL POSTURE</p>
                     <h2>Choose your boundary</h2>
                 </div>
-                <span class="lock-glyph" aria-hidden="true">+</span>
+                <span class="lock-glyph" aria-hidden="true">🛡️</span>
             </div>
             <div class="mode-toggles" role="group" aria-label="Firewall mode">
                 <button class="mode-button" data-mode="Off" type="button">
@@ -64,16 +87,100 @@
             </div>
             <p id="mode-feedback" class="mode-feedback" role="status" aria-live="polite">Syncing firewall posture...</p>
         </section>
+        
+        <!-- Restricted Guest Control Panel -->
+        <section class="control-panel glass-panel restricted-view" id="guest-control-panel">
+            <div class="panel-heading" style="margin-bottom:0;">
+                <div>
+                    <p class="section-kicker">FIREWALL POSTURE (RESTRICTED)</p>
+                    <h2>Modes locked by Master PID</h2>
+                    <p style="color:var(--faint); font-size:12px; margin-top:8px;">Log in with an authorized administrator passkey to modify firewall settings.</p>
+                </div>
+                <span class="lock-glyph" style="color:var(--coral); border-color:var(--coral);" aria-hidden="true">✕</span>
+            </div>
+        </section>
 
+        <!-- Master Admin Management & Rules Studio -->
+        <section class="control-panel glass-panel" id="master-studio-panel" style="display:none;">
+            <div class="panel-heading">
+                <div>
+                    <p class="section-kicker">ADMIN & RULE STUDIO</p>
+                    <h2>System Control Center</h2>
+                </div>
+                <span class="lock-glyph" aria-hidden="true">⚙</span>
+            </div>
+
+            <div class="studio-grid">
+                <div class="studio-card">
+                    <h3>Manage Administrators</h3>
+                    <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Add or revoke secondary admin principals.</p>
+                    <form id="add-admin-form" style="display:flex; gap:8px; margin-bottom:12px;">
+                        <input type="text" id="new-admin-input" placeholder="Principal ID (e.g. xxxxx-...)" class="studio-input" required>
+                        <button type="submit" class="network-pill send-btn" style="padding: 0 16px;">Add</button>
+                    </form>
+                    <div id="admin-list-container" class="admin-list">
+                        <small style="color:var(--faint);">Loading admin list...</small>
+                    </div>
+                </div>
+
+                <div class="studio-card">
+                    <h3>Security Rules & Regex Studio</h3>
+                    <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Toggle heuristic inspection layers instantly.</p>
+                    <form id="rules-form" style="display:flex; flex-direction:column; gap:10px;">
+                        <label class="toggle-label"><input type="checkbox" id="rule-injection"> Block Prompt Injections</label>
+                        <label class="toggle-label"><input type="checkbox" id="rule-destructive"> Block Destructive System Commands</label>
+                        <label class="toggle-label"><input type="checkbox" id="rule-privilege"> Block Privilege Escalation</label>
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+                            <span style="font-size:12px; color:var(--text);">Max Context Length</span>
+                            <input type="number" id="rule-max-context" class="studio-input" style="width:120px;" min="500" max="100000">
+                        </div>
+                        <button type="submit" class="network-pill send-btn" style="margin-top:8px;">Save Rule Config</button>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <!-- Dynamic User Principal ID Clipboard Widget -->
+        <section class="control-panel glass-panel" id="pid-vault-panel" style="margin-top: 16px;">
+            <div class="panel-heading" style="margin-bottom: 8px;">
+                <div>
+                    <p class="section-kicker">AUTHENTICATED IDENTITY</p>
+                    <h2>Your Principal ID</h2>
+                </div>
+                <span class="lock-glyph" aria-hidden="true">🆔</span>
+            </div>
+            <p style="color:var(--faint); font-size:12px; margin-bottom: 12px;">Your active cryptographic principal identifier on the Internet Computer network.</p>
+            <div class="glass-card pid-container" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px;">
+                <div style="font-family: monospace; font-size: 13px; color: #a1a1aa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;" id="userPidDisplay">
+                    Not logged in (Click II Passkey Login above)
+                </div>
+                <button onclick="copyUserPid()" id="copyPidBtn" style="background: linear-gradient(135deg, #3b82f6, #2563eb); border: none; color: white; padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 8px; cursor: pointer; transition: all 0.2s ease;" type="button">
+                    Copy PID
+                </button>
+            </div>
+        </section>
+
+        <!-- Chat Sandbox & Conversation History Stream -->
         <section class="chat-section glass-panel">
             <div class="panel-heading">
                 <div>
                     <p class="section-kicker">LIVE INTERACTION</p>
-                    <h2>Prompt Sandbox</h2>
+                    <h2>Prompt Sandbox & History</h2>
                 </div>
-                <span class="live-label"><span class="pulse-dot"></span> WEBBOUND</span>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <button id="clear-history-btn" class="network-pill interactive-btn" style="padding: 4px 10px; font-size: 9px;" type="button">Clear History</button>
+                    <span class="live-label"><span class="pulse-dot"></span> WEBBOUND</span>
+                </div>
             </div>
-            <form id="chat-form" class="chat-form">
+
+            <!-- Scrollable Conversation Feed -->
+            <div id="chat-history-container" class="chat-history-stream">
+                <div class="chat-history-empty" id="chat-history-empty">
+                    <p style="color:var(--faint); font-family:'DM Mono', monospace; font-size:12px; text-align:center; padding:24px 0;">No active prompts in session memory. Enter a prompt below to begin evaluation stream.</p>
+                </div>
+            </div>
+
+            <form id="chat-form" class="chat-form" style="margin-top: 16px;">
                 <div class="chat-input-wrap">
                     <textarea id="prompt-input" rows="3" placeholder="Enter prompt to evaluate against active boundary rules..." aria-label="Prompt input" required></textarea>
                 </div>
@@ -85,14 +192,6 @@
                     </button>
                 </div>
             </form>
-            <div id="chat-output-card" class="chat-output-card hidden">
-                <div class="output-header">
-                    <span id="output-badge" class="output-badge">ALLOWED</span>
-                    <span id="output-mode-tag" class="output-mode-tag">MODE: MEDIUM</span>
-                </div>
-                <p id="output-text" class="output-text"></p>
-                <small id="output-reason" class="output-reason"></small>
-            </div>
         </section>
 
         <section class="stats-grid" aria-label="Relay statistics">
@@ -140,11 +239,32 @@
 
         <footer class="footer-bar">
             <a class="footer-brand" href="https://internetcomputer.org" target="_blank" rel="noopener noreferrer">
-                <img src="assets/icp-logo.svg" alt="Internet Computer Logo"> Built on the Internet Computer
+                <img src="assets/icp-logo.svg" alt="Internet Computer Logo"> Built on the Internet Computer Protocol
             </a>
             <span>Private by design</span>
         </footer>
     </main>
-    <script type="module" src="main.js?v=19"></script>
+
+    <script>
+    function copyUserPid() {
+        const pidText = document.getElementById("userPidDisplay").innerText.trim();
+        if (pidText.startsWith("Not logged in")) {
+            alert("Please log in with Internet Identity first to copy your Principal ID.");
+            return;
+        }
+        navigator.clipboard.writeText(pidText).then(() => {
+            const btn = document.getElementById("copyPidBtn");
+            btn.innerText = "Copied! ✨";
+            btn.style.background = "linear-gradient(135deg, #10b981, #059669)";
+            setTimeout(() => {
+                btn.innerText = "Copy PID";
+                btn.style.background = "linear-gradient(135deg, #3b82f6, #2563eb)";
+            }, 2000);
+        }).catch(err => {
+            console.error("Failed to copy PID: ", err);
+        });
+    }
+    </script>
+    <script type="module" src="main.js?v=31"></script>
 </body>
 </html>

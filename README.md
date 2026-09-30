@@ -40,9 +40,9 @@ Running natively as a smart contract canister on the Internet Computer (ICP), IC
 
 🛠️ Quick Start & Setup
 Prerequisites
- * [suspicious link removed] (v0.15.0 or higher)
+* dfx[https://internetcomputer.org/docs/current/developer-docs/getting-started/install/] (v0.15.0 or higher)
  * Python 3.10+ with requests installed (pip install requests)
- * Local LLM Runner (e.g., Ollama, LM Studio, or local API daemon)
+ * Local LLM Runner (e.g., Ollama https://ollama.com/ , LM Studio, or local API daemon)
 1. Deploying the Canister to Local Replica / Mainnet
  * Clone the repository:
    git clone https://github.com/iTechBod/ICfirewall.git
@@ -71,7 +71,7 @@ python3 scripts/poll_llm.py
  * The script will securely poll the canister for queued prompts, execute them against your local model, and return responses back to the canister pipeline.
 📱 Apple iOS Shortcut Setup
 You can trigger your on-chain firewall directly from an iPhone using native Apple Shortcuts.
- * Ready-to-use Shortcut: Download iOS Shortcut Template
+ * Ready-to-use Shortcut: Download iOS Shortcut Template https://www.icloud.com/shortcuts/f4dd4bd3ffd04ff4a19e82f5a7113ba8
 Manual Shortcut Configuration
  * Add an action: Ask for Input (Prompt text).
  * Add an action: Get Contents of URL:

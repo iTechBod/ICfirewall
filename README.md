@@ -1,99 +1,127 @@
-# ICfirewall
-a firewall for local llm on odysseus built on the Internet Computer blockchain
-🛡️ ICfirewall Command Center
-Zero-Trust Relay & Security Dashboard on the Internet Computer
-ICfirewall is a lightweight, privacy-first command center designed to monitor local AI prompt traffic, enforce security boundaries, and display threat telemetry—all running on the Internet Computer (ICP).
-📌 Project Features
-⚬	Real-time Boundary Toggles: Switch seamlessly between Off, Medium, and On security modes.
-⚬	Live Telemetry: Monitor processed prompts, blocked threats, active queue length, and overall system health.
-⚬	Threat Vault: View recent security events and payload snippets in a dynamic dashboard table.
-⚬	On-Chain Coffee Support: Quickly copy the developer’s Principal ID to send ICP tips.
-⚬	Dev Link: Direct external link to the hosted developer site on IC boundary nodes.
-
+🛡️ ICfirewall
+> Zero-Trust On-Chain AI Security Relay & Command Center on the Internet Computer
+> 
+ICfirewall is a privacy-first, decentralized firewall and command center designed to sit between external client interfaces (web dashboards, iOS Shortcuts, hardware triggers) and local AI inference pipelines (Ollama, Dolphin-Cyber, Odysseus local daemons).
+Running natively as a smart contract canister on the Internet Computer (ICP), ICfirewall inspects, sanitizes, and controls prompt traffic in real time before passing payloads to local inference engines, ensuring zero-trust boundary enforcement and full threat telemetry.
+📌 Features
+ * 3-Stage Real-Time Security Engine: Dynamic runtime switching between Off, Medium, and On boundary containment modes.
+ * Live Threat Telemetry & Vault: Real-time tracking of processed prompts, blocked injections, queue density, and dynamic logging of suspicious payloads in an on-chain threat vault.
+ * Apple Glass Dark-Mode UI: Minimalist, translucent glassmorphism command center built with native CSS/JS and responsive layout components.
+ * Multi-Client Access (iOS & Web): Execute prompts directly from native Apple iOS Shortcuts using encrypted Bearer tokens or via the integrated web terminal.
+ * Local Daemon Bridge (poll_llm.py): Asynchronous local daemon script that polls the ICP canister safely, executes local model inference, and returns sanitized outputs back on-chain.
+ * Decentralized Support: Integrated ICP tip jar, direct developer links, and fully client-side execution.
 🗂️ Project Structure
-
 .
-├── index.html    # Main user interface & component layout
-├── main.js       # Frontend logic, Canister actor connection, & event listeners
-├── styles.css    # Dark-mode glassmorphism styling & animations
-└── README.md     # Project documentation
+├── src/
+│   ├── main.mo           # Backend Motoko Canister (State, Security Rules, API Endpoints)
+│   ├── index.html        # Apple Glass UI Layout & Component Definitions
+│   ├── main.js           # @dfinity/agent Connection, Actor Calls, & Real-time State Polling
+│   └── styles.css        # Minimalist Glassmorphism Styling, Glows, & Dark Mode Aesthetics
+├── scripts/
+│   └── poll_llm.py       # Local Python Daemon for Polling Canister & Executing Local LLMs
+└── README.md             # Project Documentation
 
-🛠️ How to Customize & Update the Code
-If you want to edit or add new features without breaking existing functionality, follow these step-by-step instructions.
-1. Connecting Your Own Canister Backend
-When you deploy your smart contract (canister), you need to link main.js to it:
-	1.	Open main.js.
-	2.	Find CANISTER_ID:
-const CANISTER_ID = isLocalReplica
+⚙️ Architecture & Execution Flow
+[ iOS Shortcut / Web UI ]
+         │
+         │ (HTTP POST / API call with Bearer Auth)
+         ▼
+[ ICP Canister: ICfirewall ]
+  ├── 1. Verify Authorization Token
+  ├── 2. Apply Boundary Mode Sanitization (OFF / MEDIUM / ON)
+  └── 3. Queue Validated Payload in On-Chain Memory State
+         │
+         │ (Polls Canister Queue)
+         ▼
+[ Local Python Daemon (poll_llm.py) ]
+  ├── 1. Fetches Pending Prompts via HttpAgent / Requests
+  ├── 2. Sends Payload to Local LLM (e.g., Ollama / Dolphin 3 Cyber)
+  └── 3. Writes Model Response / Threat Telemetry Back to Canister
+
+🛠️ Quick Start & Setup
+Prerequisites
+ * [suspicious link removed] (v0.15.0 or higher)
+ * Python 3.10+ with requests installed (pip install requests)
+ * Local LLM Runner (e.g., Ollama, LM Studio, or local API daemon)
+1. Deploying the Canister to Local Replica / Mainnet
+ * Clone the repository:
+   git clone https://github.com/iTechBod/ICfirewall.git
+cd ICfirewall
+
+ * Start the local ICP network & deploy:
+   dfx start --background
+dfx deploy
+
+ * Deploy to Mainnet (Optional):
+   dfx deploy --network ic
+
+2. Linking the Frontend Command Center
+ * Open main.js.
+ * Set your deployed Canister ID:
+   const CANISTER_ID = isLocalReplica
   ? 'YOUR-LOCAL-CANISTER-ID'
   : 'YOUR-PRODUCTION-CANISTER-ID';
 
-	2.	Paste your generated Canister IDs inside the single quotes.
-🤖 How to Prompt AI for Code Changes
-When working with ChatGPT, Claude, or Gemini to modify this project, use clear, precise instructions. Here are exact templates you can use:
-Example 1: Adding a New Button
-"I have an existing index.html and main.js web project. Add a new button in the header topbar named 'Documentation' that opens 'https://docs.example.com' in a new tab when clicked. Ensure event listeners are bound properly in main.js and styled consistently with existing buttons."
-Example 2: Changing Styles or Layout
-"Modify styles.css to change the main highlight color from cyan (#67e8f9) to emerald green (#10b981). Update all gradients and glows accordingly."
-Example 3: Modifying Dashboard Data Fields
-"Update index.html and main.js to add a new statistics card called 'Tokens Analyzed' next to 'Processed Prompts'. Handle fetching and displaying this value from the canister actor."
-⚙️ How It Works Under the Hood
-	1.	Initialization: When index.html loads, main.js instantiates an @dfinity/agent HttpAgent.
-	2.	Environment Detection: The app checks window.location.hostname. If running locally (localhost or 127.0.0.1), it connects to the local replica at http://localhost:4943 and calls fetchRootKey(). If deployed live, it routes through [https://icp0.io](https://icp0.io).
-	3.	Actor Interface: It builds an Actor interface using idlFactory, matching the canister methods (getStats, getThreats, setMode).
-	4.	Polling Cycle: The app initiates a 3-second polling interval via startLiveRefresh() to continually sync backend data with the frontend UI without requiring manual refreshes.
-🚀 Local Development Setup
-	1.	Clone the repository:
-git clone https://github.com/iTechBod/ICfirewall.git
-cd icfirewall
+ * Open index.html in any browser or host it via ICP Asset Canister.
+3. Running the Local Python Daemon
+ * Set your backend session environment variable and start the daemon:
+   export ODYSSEUS_SESSION_ID="YOUR-SESSION-UUID"
+python3 scripts/poll_llm.py
 
-	2.	Start local replica & deploy canister (DFX required):
-dfx start --background
-dfx deploy
+ * The script will securely poll the canister for queued prompts, execute them against your local model, and return responses back to the canister pipeline.
+📱 Apple iOS Shortcut Setup
+You can trigger your on-chain firewall directly from an iPhone using native Apple Shortcuts.
+ * Ready-to-use Shortcut: Download iOS Shortcut Template
+Manual Shortcut Configuration
+ * Add an action: Ask for Input (Prompt text).
+ * Add an action: Get Contents of URL:
+   * URL: https://<YOUR-CANISTER-ID>.raw.icp0.io/api/prompt
+   * Method: POST
+   * Headers:
+     * Key: Authorization
+     * Value: Bearer cyber-dolphin-2026
+   * Request Body: File or Text passing the provided input.
+🛡️ Security Boundary Modes & Limitations
+ICfirewall implements three dynamic boundary modes to manage incoming prompts and outgoing model responses.
+| Mode | Visual Indicator | Filtering Rigor | Target Latency | Best Used For |
+|---|---|---|---|---|
+| OFF | Cyan Neutral | No Sanitization | ~0ms overhead | Unrestricted local testing & raw model evaluation |
+| MEDIUM | Emerald Glow | Balanced Pattern Matching | ~50–150ms | Daily operational usage, balance of security & speed |
+| ON | Crimson Warning | Strict Regex & Containment | ~150–300ms | High-security execution, untrusted third-party inputs |
+Detailed Mode Breakdown
+1. Boundary OFF (orb-off)
+ * Zero Input/Output Sanitization: Bypasses prompt-injection checks, system prompt extraction protections, and character validation.
+ * Increased Vulnerability: Leaves downstream AI processing pipelines exposed to adversarial jailbreak attempts.
+ * No Defensive Masking: Model outputs containing raw system leaks or malicious code render unformatted into client interfaces.
+2. Boundary MEDIUM (orb-medium)
+ * Balanced Filtering: Intercepts known injection vectors, command execution strings, and common jailbreak structures.
+ * Occasional False Positives: May flag complex technical jargon, reverse-engineering code snippets, or system logs that mimic exploit payloads.
+ * Partial Redaction: Strips unsafe formatting or high-risk sub-strings while retaining core semantic response context.
+3. Boundary ON (orb-on)
+ * Strict Containment: Enforces strict regular expressions, character set limits, and semantic entropy checks.
+ * High Strictness Impact: May block valid developer queries, nested Markdown code blocks, or raw exploit samples.
+ * Response Truncation: Dynamically terminates response streams if output token entropy crosses high-risk safety thresholds.
+📡 API Specification
+Submit Prompt Payload
+POST /api/prompt HTTP/1.1
+Host: <CANISTER_ID>.raw.icp0.io
+Authorization: Bearer cyber-dolphin-2026
+Content-Type: application/json
 
-	3.	Serve frontend:
-Run any standard local web server or open index.html directly in a browser connected to your local agent.
+{
+  "prompt": "Analyze this smart contract function for reentrancy vulnerabilities."
+}
 
+Response
+{
+  "status": "queued",
+  "prompt_id": "8f9a2b1c",
+  "mode_applied": "MEDIUM",
+  "sanitized": true
+}
 
-    4.Make a shortcut on your iPhone
-	here's a ready to use one (add backend canister id) https://www.icloud.com/shortcuts/f4dd4bd3ffd04ff4a19e82f5a7113ba8
-	if you wanna make it manually:
-	add an action named ask for input,then in the next action add get contents of url, in the url type [https://YOUR BACKEND CANISTER ID.raw.icp0.io/api/prompt] and click the arrow to expand on the action, select method as post, add headers and in key type Authorization, in value type Bearer cyber-dolphin-2026 and change file to privded input
-
-	and if you don't got iPhone just use the inside web prompt chat, have fun!
-
-
-off,medium and on boundry button limitations:
-## Security Boundary Modes & Limitations
-
-The application uses three boundary modes to manage incoming/outgoing AI prompts and model responses. Below are the functional and performance limitations for each mode.
-
----
-
-### 1. Boundary OFF (`orb-off`)
-*Disables active filtering and safety interventions.*
-
-* **Zero Input/Output Sanitization:** Bypasses all prompt-injection checks, strict content filtering, and structural validation.
-* **Increased System Vulnerability:** Leaves the downstream AI processing pipeline exposed to adversarial prompt injections, system prompt leaking, and jailbreak payloads.
-* **Visual Ambiguity:** In the default UI, selecting "Off" highlights the active button in cyan, which can visually misrepresent an insecure state as an active safety feature.
-* **No Safety Fallbacks:** Failures or malicious outputs from model responses will render directly into the user interface without defensive masking.
-
----
-
-### 2. Boundary MEDIUM (`orb-medium`)
-*Balanced filtering designed for general use and basic abuse prevention.*
-
-* **False Positives on Technical Jargon:** May accidentally flag or block legitimate technical terms, security code snippets, or system logs that resemble exploit payloads.
-* **Latency Overhead:** Introduces slight processing delay (roughly 50–150ms) to inspect payloads before forwarding them to the execution layer.
-* **Heuristic Blind Spots:** Relies on lightweight pattern matching and static heuristics, which can miss complex, multi-turn, or deeply obfuscated prompt injections.
-* **Partial Output Redaction:** May strip formatting or partial context out of model outputs when suspicious patterns are detected.
-
----
-
-### 3. Boundary ON (`orb-on`)
-*Strict validation mode for high-security environments.*
-
-* **High Strictness & Reduced Utility:** Frequently blocks edge-case inputs, developer queries, and raw code snippets due to aggressive regex and semantic containment.
-* **Noticeable Processing Latency:** Runs full validation passes on both input queries and output responses, increasing end-to-end response times.
-* **Potential Response Truncation:** Outputs with high entropy, dynamic formatting, or uncommon characters may trigger automated safety blocks mid-generation.
-* **Strict Character Limits:** Restricts allowable payload length and character sets, limiting long-form inputs or complex markdown structures.
+☕ Support & Community
+ * Developer Profile: GitHub @iTechBod
+ * Official Creator Hub: 2n2uw-uaaaa-aaaag-at2hq-cai.icp.net
+ * Telegram Channel: https://t.me/techbod
+Built on the Internet Computer Protocol.

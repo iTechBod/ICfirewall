@@ -121,7 +121,7 @@ Response
 }
 
 ☕ Support & Community
- * Developer Profile: GitHub @iTechBod
  * Official Creator Hub: 2n2uw-uaaaa-aaaag-at2hq-cai.icp.net
  * Telegram Channel: https://t.me/techbod
+
 Built on the Internet Computer Protocol.

@@ -15,7 +15,7 @@ PROJECT_ROOT = DAEMON_DIR.parent
 CANISTER_IDS_PATH = PROJECT_ROOT / "canister_ids.json"
 ODYSSEUS_CONFIG_PATH = PROJECT_ROOT / "odysseus_config.json"
 
-DEFAULT_IC_CANISTER_ID = ""
+DEFAULT_IC_CANISTER_ID = "YOUR_PRODUCTION_CANISTER_ID_HERE"
 
 # Matches standard ICP Principal/Canister ID format
 CANISTER_ID_REGEX = re.compile(r"\b[a-z0-9]{5}(?:-[a-z0-9]{5}){4}\b", re.IGNORECASE)
@@ -110,7 +110,6 @@ def parse_candid_pending_task(raw_output: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
-    # Regex fallback for raw text candid output (e.g. opt record { ticketId = 123 : nat; prompt = "..." })
     ticket_match = re.search(r'ticketId\s*=\s*([0-9]+)', raw_output)
     prompt_match = re.search(r'prompt\s*=\s*"([^"]*(?:\\.[^"]*)*)"', raw_output, re.DOTALL)
     
@@ -221,7 +220,7 @@ def setup_wizard() -> tuple[str, str, str, dict]:
             with open(CANISTER_IDS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            print(f"⚠️️ Warning reading canister_ids.json: {e}")
+            print(f"⚠ Warning reading canister_ids.json: {e}")
 
     if "relay_backend" not in data:
         data["relay_backend"] = {}
@@ -310,7 +309,7 @@ def setup_wizard() -> tuple[str, str, str, dict]:
     odysseus_pass = getpass.getpass(f"Odysseus Password{prompt_pass}: ").strip() or env_pass
 
     env_session = saved_config.get(
-        "session_id", os.getenv("ODYSSEUS_SESSION_ID", "53c98808-7af3-4098-80a1-8b74911d6e54")
+        "session_id", os.getenv("ODYSSEUS_SESSION_ID", "default-session-id")
     )
     odysseus_session_input = input(f"Odysseus Session ID [{env_session}]: ").strip()
     odysseus_session = odysseus_session_input if odysseus_session_input else env_session
@@ -578,7 +577,6 @@ def main():
                     time.sleep(3)
                     continue
 
-                # Safeguard: Never leave reply empty on safety/refusal blocks so frontend ticket clears
                 if not reply:
                     reply = "I cannot fulfill this request due to safety policies."
 

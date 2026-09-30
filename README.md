@@ -1,7 +1,7 @@
 🛡️ ICfirewall
 > Zero-Trust On-Chain AI Security Relay & Command Center on the Internet Computer
 > 
-ICfirewall is a privacy-first, decentralized firewall and command center designed to sit between external client interfaces (web dashboards, iOS Shortcuts, hardware triggers) and local AI inference pipelines (Ollama, Dolphin-Cyber, Odysseus local daemons).
+ICfirewall is a privacy-first, decentralized firewall and command center designed to sit between external client interfaces (web dashboards, iOS Shortcuts, hardware triggers) and local AI inference pipelines.
 Running natively as a smart contract canister on the Internet Computer (ICP), ICfirewall inspects, sanitizes, and controls prompt traffic in real time before passing payloads to local inference engines, ensuring zero-trust boundary enforcement and full threat telemetry.
 📌 Features
  * 3-Stage Real-Time Security Engine: Dynamic runtime switching between Off, Medium, and On boundary containment modes.

@@ -52,7 +52,7 @@ actor RelayBackend {
     stable var totalProcessed : Nat = 0;
     stable var totalBlocked : Nat = 0;
     
-    stable var masterPrincipal : ?Principal = ?Principal.fromText("wlwt3-udsnn-x5e55-jumbo-dollo-a4uoz-cbzri-vsljn-xaq5v-jxqb5-vae"); 
+    stable var masterPrincipal : ?Principal = null; // Unassigned by default on clean GitHub repo deployment
     stable var adminPrincipals : [Principal] = [];
     
     stable var securityRules : SecurityRulesConfig = {
@@ -277,7 +277,6 @@ actor RelayBackend {
         switch (resultsMap.get(ticket)) {
             case (null) { return null; };
             case (?res) {
-                // Keep result briefly in map or safely remove after read
                 return ?res;
             };
         };

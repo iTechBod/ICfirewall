@@ -3,10 +3,12 @@ import Array "mo:base/Array";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import List "mo:base/List";
+import Principal "mo:base/Principal";
+import Nat "mo:base/Nat";
+import RBTree "mo:base/RBTree";
 
 actor RelayBackend {
 
-    // --- Types ---
     public type FirewallMode = { #Off; #Medium; #On };
     public type ThreatEvent = {
         timestamp : Int;
@@ -19,30 +21,55 @@ actor RelayBackend {
         totalProcessed : Nat;
         totalBlocked : Nat;
         activeQueueLength : Nat;
+        masterPid : Text;
+        adminCount : Nat;
     };
     public type PromptResult = {
         allowed : Bool;
         mode : Text;
         response : Text;
         reason : Text;
+        ticketId : ?Nat;
+    };
+    public type PendingTask = {
+        ticketId : Nat;
+        prompt : Text;
+    };
+
+    public type SecurityRulesConfig = {
+        blockPromptInjection : Bool;
+        blockDestructiveCommands : Bool;
+        blockPrivilegeEscalation : Bool;
+        maxContextLength : Nat;
     };
 
     public type HeaderField = (Text, Text);
     public type HttpRequest = { method : Text; url : Text; headers : [HeaderField]; body : Blob };
     public type HttpResponse = { status_code : Nat16; headers : [HeaderField]; body : Blob; upgrade : ?Bool };
 
-    // --- State Variables ---
-    private var currentMode : FirewallMode = #Medium;
-    private var totalProcessed : Nat = 0;
-    private var totalBlocked : Nat = 0;
+    // --- Stable State ---
+    stable var currentMode : FirewallMode = #Medium;
+    stable var totalProcessed : Nat = 0;
+    stable var totalBlocked : Nat = 0;
     
-    // FIFO Queue for multi-prompt processing
-    private var promptQueue : List.List<Text> = List.nil();
-    private var latestResponse : Text = "";
-    private var responseAvailable : Bool = false;
+    stable var masterPrincipal : ?Principal = ?Principal.fromText("wlwt3-udsnn-x5e55-jumbo-dollo-a4uoz-cbzri-vsljn-xaq5v-jxqb5-vae"); 
+    stable var adminPrincipals : [Principal] = [];
+    
+    stable var securityRules : SecurityRulesConfig = {
+        blockPromptInjection = true;
+        blockDestructiveCommands = true;
+        blockPrivilegeEscalation = true;
+        maxContextLength = 12000;
+    };
 
-    private var threatLog : [var ?ThreatEvent] = [var null, null, null, null, null, null, null, null, null, null];
-    private var logPointer : Nat = 0;
+    stable var nextTicketId : Nat = 1;
+    stable var latestGlobalResponse : Text = "";
+    stable var threatLog : [var ?ThreatEvent] = [var null, null, null, null, null, null, null, null, null, null];
+    stable var logPointer : Nat = 0;
+
+    private var promptQueue : List.List<(Nat, List.List<(Text, Text)>)> = List.nil();
+    private var promptsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
+    private var resultsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
 
     private func previewText(t : Text, maxLen : Nat) : Text {
         if (t.size() <= maxLen) return t;
@@ -62,33 +89,52 @@ actor RelayBackend {
         totalBlocked += 1;
     };
 
+    private func isMaster(p : Principal) : Bool {
+        switch (masterPrincipal) {
+            case (null) { false; };
+            case (?m) { m == p; };
+        }
+    };
+
+    private func isAdminOrMaster(p : Principal) : Bool {
+        if (isMaster(p)) return true;
+        for (admin in adminPrincipals.vals()) {
+            if (admin == p) return true;
+        };
+        return false;
+    };
+
     private func scanForThreats(payload : Text) : ?Text {
         let lower = Text.toLowercase(payload);
 
-        if (Text.contains(lower, #text "ignore previous instructions") or 
+        if (securityRules.blockPromptInjection and (
+            Text.contains(lower, #text "ignore previous instructions") or 
             Text.contains(lower, #text "system override") or 
             Text.contains(lower, #text "jailbreak") or 
-            Text.contains(lower, #text "bypass security")) {
+            Text.contains(lower, #text "bypass rules") or
+            Text.contains(lower, #text "disregard all prior"))) {
             return ?"Prompt Injection Blocked";
         };
 
-        if (Text.contains(lower, #text "rm -rf") or 
-            Text.contains(lower, #text "delete hard drive") or 
-            Text.contains(lower, #text "erase hard drive") or 
+        if (securityRules.blockDestructiveCommands and (
+            Text.contains(lower, #text "rm -rf") or 
             Text.contains(lower, #text "format disk") or 
-            Text.contains(lower, #text "mkfs")) {
-            return ?"Destructive File Removal Blocked";
+            Text.contains(lower, #text "mkfs") or
+            Text.contains(lower, #text "drop table") or
+            Text.contains(lower, #text "truncate table"))) {
+            return ?"Destructive Manipulation Blocked";
         };
 
-        if (Text.contains(lower, #text "sudo") or 
-            Text.contains(lower, #text "root access") or 
-            Text.contains(lower, #text "change password") or 
+        if (securityRules.blockPrivilegeEscalation and (
+            Text.contains(lower, #text "sudo ") or 
             Text.contains(lower, #text "chmod 777") or 
-            Text.contains(lower, #text "passwd")) {
+            Text.contains(lower, #text "/etc/passwd") or
+            Text.contains(lower, #text "/etc/shadow") or
+            Text.contains(lower, #text "chown root"))) {
             return ?"Privilege Escalation Blocked";
         };
 
-        if (Text.size(payload) > 8000) {
+        if (securityRules.maxContextLength > 0 and Text.size(payload) > securityRules.maxContextLength) {
             return ?"Context Overflow Blocked";
         };
 
@@ -103,55 +149,149 @@ actor RelayBackend {
         }
     };
 
-    private func enqueuePrompt(item : Text) {
-        promptQueue := List.append(promptQueue, ?(item, List.nil()));
+    private func enqueuePrompt(item : Text) : Nat {
+        let ticket = nextTicketId;
+        nextTicketId += 1;
+        promptsMap.put(ticket, item);
+        promptQueue := List.append(promptQueue, ?((ticket, List.nil()), null));
+        return ticket;
     };
 
-    private func dequeuePrompt() : Text {
-        switch (promptQueue) {
-            case (null) "";
-            case (?(head, tail)) {
-                promptQueue := tail;
-                head;
-            };
+    public query func getMasterPID() : async Text {
+        switch (masterPrincipal) {
+            case (null) { return "Unassigned"; };
+            case (?p) { return Principal.toText(p); };
         };
     };
 
+    public shared(msg) func getCallerPID() : async Text {
+        return Principal.toText(msg.caller);
+    };
+
+    public shared(msg) func claimMasterPID(pidText : Text) : async Text {
+        let caller = msg.caller;
+        switch (masterPrincipal) {
+            case (?m) {
+                if (m != caller) {
+                    return "Error: Master Principal already claimed.";
+                };
+            };
+            case (null) {
+                masterPrincipal := ?caller;
+            };
+        };
+        return "Master ownership successfully claimed.";
+    };
+
+    public query func checkIsAdmin(pidText : Text) : async Bool {
+        try {
+            let p = Principal.fromText(pidText);
+            return isAdminOrMaster(p);
+        } catch (_) {
+            return false;
+        };
+    };
+
+    public query func getAdmins() : async [Text] {
+        var res : [Text] = [];
+        for (admin in adminPrincipals.vals()) {
+            res := Array.append<Text>(res, [Principal.toText(admin)]);
+        };
+        return res;
+    };
+
+    public shared(msg) func addAdmin(pidText : Text) : async Text {
+        if (not isMaster(msg.caller)) { return "Unauthorized: Master only."; };
+        try {
+            let p = Principal.fromText(pidText);
+            if (isAdminOrMaster(p)) { return "Already an admin."; };
+            adminPrincipals := Array.append<Principal>(adminPrincipals, [p]);
+            return "Admin added successfully.";
+        } catch (_) {
+            return "Error: Invalid Principal format.";
+        };
+    };
+
+    public shared(msg) func removeAdmin(pidText : Text) : async Text {
+        if (not isMaster(msg.caller)) { return "Unauthorized: Master only."; };
+        try {
+            let target = Principal.fromText(pidText);
+            var updated : [Principal] = [];
+            for (admin in adminPrincipals.vals()) {
+                if (admin != target) {
+                    updated := Array.append<Principal>(updated, [admin]);
+                };
+            };
+            adminPrincipals := updated;
+            return "Admin revoked successfully.";
+        } catch (_) {
+            return "Error: Invalid Principal format.";
+        };
+    };
+
+    public query func getSecurityRules() : async SecurityRulesConfig {
+        return securityRules;
+    };
+
+    public shared(msg) func updateSecurityRules(newConfig : SecurityRulesConfig) : async Text {
+        if (not isAdminOrMaster(msg.caller)) { return "Unauthorized: Admin/Master only."; };
+        securityRules := newConfig;
+        return "Security rules updated successfully.";
+    };
+
     public query func getStats() : async SystemStats {
+        let masterText = switch(masterPrincipal) { case(null) "Unassigned"; case(?p) Principal.toText(p); };
         return { 
             mode = getModeString(); 
             totalProcessed; 
             totalBlocked; 
-            activeQueueLength = List.size(promptQueue); 
+            activeQueueLength = List.size(promptQueue);
+            masterPid = masterText;
+            adminCount = adminPrincipals.size();
         };
     };
 
-    public shared func getPendingPrompt() : async Text {
-        dequeuePrompt()
+    public shared(msg) func getPendingPrompt() : async ?PendingTask {
+        switch (promptQueue) {
+            case (null) { return null; };
+            case (?((ticket, meta), tail)) {
+                promptQueue := tail;
+                switch (promptsMap.get(ticket)) {
+                    case (null) { return null; };
+                    case (?promptText) {
+                        ignore promptsMap.remove(ticket);
+                        return ?{ ticketId = ticket; prompt = promptText };
+                    };
+                };
+            };
+        };
     };
 
-    public shared func saveResult(result : Text) : async Text {
-        latestResponse := result;
-        responseAvailable := true;
-        "Result Saved"
+    public shared(msg) func saveResult(ticket : Nat, result : Text) : async Text {
+        resultsMap.put(ticket, result);
+        latestGlobalResponse := result;
+        return "Result Saved";
     };
 
-    public shared func takeLatestResponse() : async Text {
-        let response = if (responseAvailable) latestResponse else "";
-        latestResponse := "";
-        responseAvailable := false;
-        response
+    public query func checkResponse(ticket : Nat) : async ?Text {
+        switch (resultsMap.get(ticket)) {
+            case (null) { return null; };
+            case (?res) {
+                // Keep result briefly in map or safely remove after read
+                return ?res;
+            };
+        };
     };
 
-    public shared func setMode(newModeText : Text) : async Text {
+    public shared(msg) func setMode(newModeText : Text) : async Text {
+        if (not isAdminOrMaster(msg.caller)) { return "Unauthorized: Admin/Master only."; };
         if (newModeText == "Off") { currentMode := #Off; }
         else if (newModeText == "On") { currentMode := #On; }
         else { currentMode := #Medium; };
         return "Mode updated.";
     };
 
-    // --- Direct Web Interface Endpoint ---
-    public shared func processPrompt(textBody : Text) : async PromptResult {
+    public shared(msg) func processPrompt(textBody : Text) : async PromptResult {
         totalProcessed += 1;
         let activeMode = getModeString();
 
@@ -162,7 +302,8 @@ actor RelayBackend {
                     allowed = false;
                     mode = activeMode;
                     response = "BLOCKED: System Locked (ON boundary active).";
-                    reason = "Execution Lockout active in ON posture."
+                    reason = "Execution Lockout active in ON posture.";
+                    ticketId = null;
                 };
             };
             case (#Medium) {
@@ -173,29 +314,30 @@ actor RelayBackend {
                             allowed = false;
                             mode = activeMode;
                             response = "BLOCKED: " # threat;
-                            reason = threat
+                            reason = threat;
+                            ticketId = null;
                         };
                     };
                     case (null) { 
-                        enqueuePrompt(textBody);
-                        latestResponse := ""; 
+                        let tid = enqueuePrompt(textBody);
                         return {
                             allowed = true;
                             mode = activeMode;
                             response = "QUEUED: Prompt forwarded to Odysseus agent queue.";
-                            reason = "Passed security heuristic filters."
+                            reason = "Passed security heuristic filters.";
+                            ticketId = ?tid;
                         };
                     };
                 };
             };
             case (#Off) { 
-                enqueuePrompt(textBody);
-                latestResponse := ""; 
+                let tid = enqueuePrompt(textBody);
                 return {
                     allowed = true;
                     mode = activeMode;
                     response = "QUEUED: Prompt forwarded to Odysseus agent queue.";
-                    reason = "Firewall posture disabled."
+                    reason = "Firewall posture disabled.";
+                    ticketId = ?tid;
                 };
             };
         };
@@ -212,112 +354,100 @@ actor RelayBackend {
         return results;
     };
 
-    // --- HTTP Gateway for iOS Shortcuts and Raw HTTP Clients ---
     public query func http_request(req : HttpRequest) : async HttpResponse {
-        if (req.method == "POST" or req.method == "OPTIONS") {
-            return { status_code = 200; headers = []; body = Blob.fromArray([]); upgrade = ?true };
-        };
-        
-        if (req.method == "GET" and (req.url == "/api/queue" or req.url == "/api/queue/")) {
-            return {
-                status_code = 200;
-                headers = [];
-                body = Blob.fromArray([]);
-                upgrade = ?true;
-            };
-        };
-
-        if (req.method == "GET" and (req.url == "/api/response" or req.url == "/api/response/")) {
-            return {
-                status_code = 200;
-                headers = [];
-                body = Blob.fromArray([]);
-                upgrade = ?true;
-            };
-        };
-
-        return { status_code = 404; headers = []; body = Text.encodeUtf8("Not Found"); upgrade = ?false };
-    };
-
-    public shared func http_request_update(req : HttpRequest) : async HttpResponse {
         let corsHeaders = [
             ("Access-Control-Allow-Origin", "*"),
             ("Access-Control-Allow-Methods", "POST, GET, OPTIONS"),
             ("Access-Control-Allow-Headers", "Content-Type"),
-            ("Cache-Control", "no-store, no-cache, must-revalidate")
+            ("Cache-Control", "no-store")
         ];
+        if (req.method == "POST" or req.method == "OPTIONS") { return { status_code = 200; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?true }; };
+        if (req.method == "GET" and (req.url == "/api/queue" or req.url == "/api/queue/")) { return { status_code = 200; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?true }; };
+        if (req.method == "GET" and (req.url == "/api/response" or req.url == "/api/response/")) { return { status_code = 200; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?true }; };
+        if (req.method == "GET" and Text.startsWith(req.url, #text "/api/check_response/")) { return { status_code = 200; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?true }; };
+        return { status_code = 404; headers = corsHeaders; body = Text.encodeUtf8("Not Found"); upgrade = ?false };
+    };
 
-        if (req.method == "OPTIONS") {
-            return { status_code = 204; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?false };
-        };
-
+    public shared func http_request_update(req : HttpRequest) : async HttpResponse {
+        let corsHeaders = [
+            ("Access-Control-Allow-Origin", "*"), 
+            ("Access-Control-Allow-Methods", "POST, GET, OPTIONS"), 
+            ("Access-Control-Allow-Headers", "Content-Type"),
+            ("Cache-Control", "no-store")
+        ];
+        if (req.method == "OPTIONS") { return { status_code = 204; headers = corsHeaders; body = Blob.fromArray([]); upgrade = ?false }; };
+        
         if (req.method == "GET" and (req.url == "/api/queue" or req.url == "/api/queue/")) {
-            let nextItem = dequeuePrompt();
-            return {
-                status_code = 200;
-                headers = corsHeaders;
-                body = Text.encodeUtf8(nextItem);
-                upgrade = ?false;
+            var respText = "";
+            switch (promptQueue) {
+                case (null) {};
+                case (?((ticket, meta), tail)) {
+                    promptQueue := tail;
+                    switch (promptsMap.get(ticket)) { 
+                        case (?txt) { respText := txt; ignore promptsMap.remove(ticket); }; 
+                        case (null) {}; 
+                    };
+                };
             };
+            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8(respText); upgrade = ?false };
         };
 
         if (req.method == "GET" and (req.url == "/api/response" or req.url == "/api/response/")) {
-            let resp = if (responseAvailable) latestResponse else "";
-            latestResponse := "";
-            responseAvailable := false;
-
-            return {
-                status_code = 200;
-                headers = corsHeaders;
-                body = Text.encodeUtf8(resp);
-                upgrade = ?false;
-            };
+            let resp = latestGlobalResponse;
+            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8(resp); upgrade = ?false };
         };
 
-        let decodedBody = switch (Text.decodeUtf8(req.body)) {
-            case (?t) t;
-            case (null) "";
-        };
-
-        if (req.url == "/api/prompt" or req.url == "/api/prompt/") {
-            if (decodedBody == "") {
-                return { status_code = 400; headers = corsHeaders; body = Text.encodeUtf8("Error: Empty Body"); upgrade = ?false };
-            };
-
-            totalProcessed += 1;
-
-            switch (currentMode) {
-                case (#On) {
-                    logThreat("Execution Lockout", "HIGH", previewText(decodedBody, 40));
-                    return { status_code = 403; headers = corsHeaders; body = Text.encodeUtf8("BLOCKED: System Locked."); upgrade = ?false };
+        if (req.method == "GET" and Text.startsWith(req.url, #text "/api/check_response/")) {
+            switch (Text.stripStart(req.url, #text "/api/check_response/")) {
+                case (?ticketStr) {
+                    switch (Nat.fromText(ticketStr)) {
+                        case (?ticket) {
+                            switch (resultsMap.get(ticket)) {
+                                case (?res) {
+                                    return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8(res); upgrade = ?false };
+                                };
+                                case (null) {
+                                    return { status_code = 202; headers = corsHeaders; body = Text.encodeUtf8("PENDING"); upgrade = ?false };
+                                };
+                            };
+                        };
+                        case (null) {
+                            return { status_code = 400; headers = corsHeaders; body = Text.encodeUtf8("Invalid Ticket ID"); upgrade = ?false };
+                        };
+                    };
                 };
+                case (null) {
+                    return { status_code = 400; headers = corsHeaders; body = Text.encodeUtf8("Invalid Path"); upgrade = ?false };
+                };
+            };
+        };
+
+        let decodedBody = switch (Text.decodeUtf8(req.body)) { case (?t) t; case (null) ""; };
+        if (req.url == "/api/prompt" or req.url == "/api/prompt/") {
+            if (decodedBody == "") { return { status_code = 400; headers = corsHeaders; body = Text.encodeUtf8("Error: Empty Body"); upgrade = ?false }; };
+            totalProcessed += 1;
+            switch (currentMode) {
+                case (#On) { return { status_code = 403; headers = corsHeaders; body = Text.encodeUtf8("BLOCKED: System Locked."); upgrade = ?false }; };
                 case (#Medium) {
                     switch (scanForThreats(decodedBody)) {
-                        case (?threat) {
-                            logThreat(threat, "CRITICAL", previewText(decodedBody, 40));
-                            return { status_code = 406; headers = corsHeaders; body = Text.encodeUtf8("BLOCKED: " # threat); upgrade = ?false };
-                        };
+                        case (?threat) { return { status_code = 406; headers = corsHeaders; body = Text.encodeUtf8("BLOCKED: " # threat); upgrade = ?false }; };
                         case (null) { 
-                            enqueuePrompt(decodedBody); 
-                            latestResponse := ""; 
+                            let tid = enqueuePrompt(decodedBody);
+                            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8(Nat.toText(tid)); upgrade = ?false };
                         };
                     };
                 };
                 case (#Off) { 
-                    enqueuePrompt(decodedBody); 
-                    latestResponse := ""; 
+                    let tid = enqueuePrompt(decodedBody);
+                    return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8(Nat.toText(tid)); upgrade = ?false };
                 };
             };
-
-            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8("QUEUED"); upgrade = ?false };
         };
 
         if (req.url == "/api/result" or req.url == "/api/result/") {
-            latestResponse := decodedBody;
-            responseAvailable := true;
-            return { status_code = 200; headers = corsHeaders; body = Text.encodeUtf8("Result Saved"); upgrade = ?false };
+            latestGlobalResponse := decodedBody;
+            return { status_code = 250; headers = corsHeaders; body = Text.encodeUtf8("Result Saved"); upgrade = ?false };
         };
-
         return { status_code = 404; headers = corsHeaders; body = Text.encodeUtf8("Not Found"); upgrade = ?false };
     };
 };

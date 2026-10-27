@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ICfirewall Agentic Daemon (Full Setup Wizard with Backend/Frontend Canister IDs, Controller Check, & Master PID Persistence)
+ICfirewall Agentic Daemon (Full Setup Wizard with Backend/Frontend Canister IDs, Controller Check, & Fixed JSON Master PID Parsing)
 """
 
 import json
@@ -289,7 +289,7 @@ def setup_wizard() -> tuple[str, str, str, dict]:
         print("   (Command: dfx canister update-settings --controller <PID> <canister_name_or_id>)")
         input("\nPress Enter once you have verified or added this principal as a controller...")
 
-    # --- Master Principal ID Setup ---
+    # --- Master Principal ID Setup & Robust On-Chain Registration ---
     print("\n--------------------------------------------------")
     print("         👑 Master Principal ID Setup            ")
     print("--------------------------------------------------")
@@ -311,8 +311,16 @@ def setup_wizard() -> tuple[str, str, str, dict]:
 
     if master_pid and BACKEND_CANISTER_ID and os.path.exists(DFX_BIN):
         try:
-            current_remote_master = call_canister("getMasterPID")
-            current_remote_master = current_remote_master.strip('()-" ')
+            raw_master_res = call_canister("getMasterPID")
+            current_remote_master = "Unassigned"
+            try:
+                parsed_json = json.loads(raw_master_res)
+                if isinstance(parsed_json, list) and len(parsed_json) > 0:
+                    current_remote_master = str(parsed_json[0])
+                elif isinstance(parsed_json, str):
+                    current_remote_master = parsed_json
+            except json.JSONDecodeError:
+                current_remote_master = raw_master_res.strip('()-" ')
 
             if current_remote_master and current_remote_master != "Unassigned":
                 print(f"ℹ️ Master PID already claimed on-chain as: {current_remote_master}")

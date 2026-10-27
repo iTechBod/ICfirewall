@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ICfirewall Agentic Daemon (Full OG Resilience + 17-field Odysseus Payload + SSE Streaming + Auth/Stream Fallbacks)
+ICfirewall Agentic Daemon (Full Setup Wizard with Backend/Frontend Canister IDs & Master PID Persistence)
 """
 
 import json
@@ -241,28 +241,31 @@ def setup_wizard() -> tuple[str, str, str, dict]:
 
     if "relay_backend" not in data:
         data["relay_backend"] = {}
+    if "relay_frontend" not in data:
+        data["relay_frontend"] = {}
 
-    current_ic_id = data["relay_backend"].get("ic", DEFAULT_IC_CANISTER_ID)
+    current_backend_id = data["relay_backend"].get("ic", DEFAULT_IC_CANISTER_ID)
+    current_frontend_id = data["relay_frontend"].get("ic", "")
 
-    print(f"\nCurrent configured IC Backend Canister ID: {current_ic_id}")
-    print("Paste raw bash / dfx deploy output (or press Enter to keep current):")
-    user_input = input("Canister Output > ").strip()
+    # --- Backend Canister ID Setup ---
+    print(f"\nCurrent configured Backend Canister ID: {current_backend_id}")
+    backend_input = input("Enter Backend Canister ID or paste deploy output (Press Enter to keep): ").strip()
+    parsed_backend_id = extract_canister_id(backend_input)
+    selected_backend_id = parsed_backend_id if parsed_backend_id else (backend_input if backend_input else current_backend_id)
+    BACKEND_CANISTER_ID = selected_backend_id
+    data["relay_backend"]["ic"] = selected_backend_id
 
-    parsed_id = extract_canister_id(user_input)
-    selected_ic_id = parsed_id if parsed_id else current_ic_id
-    BACKEND_CANISTER_ID = selected_ic_id
-
-    data["relay_backend"]["ic"] = selected_ic_id
-    try:
-        with open(CANISTER_IDS_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        print(f"💾 Updated {CANISTER_IDS_PATH.name} successfully.")
-    except Exception as e:
-        print(f"⚠ Could not write to canister_ids.json: {e}")
+    # --- Frontend Canister ID Setup ---
+    print(f"\nCurrent configured Frontend Canister ID: {current_frontend_id}")
+    frontend_input = input("Enter Frontend Canister ID (Press Enter to keep): ").strip()
+    parsed_frontend_id = extract_canister_id(frontend_input)
+    selected_frontend_id = parsed_frontend_id if parsed_frontend_id else (frontend_input if frontend_input else current_frontend_id)
+    if selected_frontend_id:
+        data["relay_frontend"]["ic"] = selected_frontend_id
 
     DFX_NETWORK = os.getenv("DFX_NETWORK", "ic").lower()
 
-    # --- Identity Configuration ---
+    # --- Identity Configuration & Master Principal Setup ---
     print("\n--------------------------------------------------")
     print("         👑 Master Principal ID Setup            ")
     print("--------------------------------------------------")
@@ -276,31 +279,34 @@ def setup_wizard() -> tuple[str, str, str, dict]:
             pass
 
     saved_master_pid = data["relay_backend"].get("master_pid", detected_principal)
-    master_pid_prompt = f"Master Principal ID (II or Dfx PID) [{saved_master_pid}]: "
+    master_pid_prompt = f"Master Principal ID [{saved_master_pid}]: "
     master_pid_input = input(master_pid_prompt).strip()
     master_pid = master_pid_input if master_pid_input else saved_master_pid
 
     if master_pid:
         data["relay_backend"]["master_pid"] = master_pid
+
+    # Save all updates to canister_ids.json
+    try:
+        with open(CANISTER_IDS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"💾 Updated {CANISTER_IDS_PATH.name} successfully.")
+    except Exception as e:
+        print(f"⚠ Could not write to canister_ids.json: {e}")
+
+    if master_pid and BACKEND_CANISTER_ID and os.path.exists(DFX_BIN):
         try:
-            with open(CANISTER_IDS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
+            current_remote_master = call_canister("getMasterPID")
+            current_remote_master = current_remote_master.strip('()-" ')
 
-        if os.path.exists(DFX_BIN):
-            try:
-                current_remote_master = call_canister("getMasterPID")
-                current_remote_master = current_remote_master.strip('()-" ')
-
-                if current_remote_master and current_remote_master != "Unassigned":
-                    print(f"ℹ️ Master PID already claimed on-chain as: {current_remote_master}")
-                else:
-                    print(f"⚡ Registering Master PID ({master_pid}) on canister {BACKEND_CANISTER_ID}...")
-                    res = call_canister("claimMasterPID", f'("{master_pid}")')
-                    print(f"✅ Canister response: {res}")
-            except Exception as e:
-                print(f"ℹ Skipped remote claimMasterPID registration: {e}")
+            if current_remote_master and current_remote_master != "Unassigned":
+                print(f"ℹ️ Master PID already claimed on-chain as: {current_remote_master}")
+            else:
+                print(f"⚡ Registering Master PID ({master_pid}) on canister {BACKEND_CANISTER_ID}...")
+                res = call_canister("claimMasterPID", f'("{master_pid}")')
+                print(f"✅ Canister response: {res}")
+        except Exception as e:
+            print(f"ℹ Skipped remote claimMasterPID registration: {e}")
 
     print("\n--------------------------------------------------")
     print("         🧠 Odysseus Agent Configuration         ")
@@ -425,7 +431,6 @@ class OdysseusClient:
             except Exception:
                 pass
 
-        # Full 17-field Agentic Payload
         chat_payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": formatted_prompt}],
@@ -518,7 +523,6 @@ class OdysseusClient:
 
         raw_out = "".join(text_parts).strip()
         
-        # Fallback to standard json read if SSE streaming yielded nothing
         if not raw_out:
             try:
                 data = response.json()
@@ -578,6 +582,10 @@ def main():
     global BACKEND_CANISTER_ID, DFX_NETWORK, ACTIVE_IDENTITY
     
     BACKEND_CANISTER_ID, DFX_NETWORK, ACTIVE_IDENTITY, odysseus_config = setup_wizard()
+
+    if not BACKEND_CANISTER_ID:
+        print("❌ Error: No Backend Canister ID configured. Please run setup and provide a valid ID.")
+        raise SystemExit(1)
 
     print("🛡️ ICfirewall Daemon Active.")
     print(f"Target Canister: {BACKEND_CANISTER_ID} ({DFX_NETWORK} via identity '{ACTIVE_IDENTITY}')")

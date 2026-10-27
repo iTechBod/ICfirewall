@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+ICfirewall Agentic Daemon (Full OG Resilience + 17-field Odysseus Payload + SSE Streaming + Auth/Stream Fallbacks)
+"""
+
 import json
 import os
 import re
@@ -6,6 +11,7 @@ import subprocess
 import time
 import getpass
 import tempfile
+import signal
 import requests
 from pathlib import Path
 
@@ -15,7 +21,7 @@ PROJECT_ROOT = DAEMON_DIR.parent
 CANISTER_IDS_PATH = PROJECT_ROOT / "canister_ids.json"
 ODYSSEUS_CONFIG_PATH = PROJECT_ROOT / "odysseus_config.json"
 
-DEFAULT_IC_CANISTER_ID = "YOUR_PRODUCTION_CANISTER_ID_HERE"
+DEFAULT_IC_CANISTER_ID = os.getenv("ICF_CANISTER_ID", "")
 
 # Matches standard ICP Principal/Canister ID format
 CANISTER_ID_REGEX = re.compile(r"\b[a-z0-9]{5}(?:-[a-z0-9]{5}){4}\b", re.IGNORECASE)
@@ -36,6 +42,16 @@ ODYSSEUS_LOG_PATH = os.path.expanduser(
 BACKEND_CANISTER_ID = DEFAULT_IC_CANISTER_ID
 DFX_NETWORK = "ic"
 ACTIVE_IDENTITY = "default"
+
+should_exit = False
+
+def handle_exit_signal(sig, frame):
+    global should_exit
+    print("\n🛑 Graceful shutdown requested...")
+    should_exit = True
+
+signal.signal(signal.SIGINT, handle_exit_signal)
+signal.signal(signal.SIGTERM, handle_exit_signal)
 
 
 def run_cmd(cmd: list[str]) -> str:
@@ -110,6 +126,7 @@ def parse_candid_pending_task(raw_output: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
+    # Regex fallback for raw text candid output
     ticket_match = re.search(r'ticketId\s*=\s*([0-9]+)', raw_output)
     prompt_match = re.search(r'prompt\s*=\s*"([^"]*(?:\\.[^"]*)*)"', raw_output, re.DOTALL)
     
@@ -283,7 +300,7 @@ def setup_wizard() -> tuple[str, str, str, dict]:
                     res = call_canister("claimMasterPID", f'("{master_pid}")')
                     print(f"✅ Canister response: {res}")
             except Exception as e:
-                print(f"ℹ Skipped remote claimMasterPID registration (Canister already initialized or restricted): {e}")
+                print(f"ℹ Skipped remote claimMasterPID registration: {e}")
 
     print("\n--------------------------------------------------")
     print("         🧠 Odysseus Agent Configuration         ")
@@ -309,7 +326,7 @@ def setup_wizard() -> tuple[str, str, str, dict]:
     odysseus_pass = getpass.getpass(f"Odysseus Password{prompt_pass}: ").strip() or env_pass
 
     env_session = saved_config.get(
-        "session_id", os.getenv("ODYSSEUS_SESSION_ID", "default-session-id")
+        "session_id", os.getenv("ODYSSEUS_SESSION_ID", "YOUR_ODYSSEUS_SESSION_ID_HERE")
     )
     odysseus_session_input = input(f"Odysseus Session ID [{env_session}]: ").strip()
     odysseus_session = odysseus_session_input if odysseus_session_input else env_session
@@ -347,6 +364,7 @@ class OdysseusClient:
                 (f"{self.url}/api/v1/auths/signin", {"email": self.username, "password": self.password}),
                 (f"{self.url}/api/v1/auths/signin", {"username": self.username, "password": self.password}),
                 (f"{self.url}/api/auth/login", {"username": self.username, "password": self.password}),
+                (f"{self.url}/api/auth/login", {"email": self.username, "password": self.password}),
             ]
 
             authenticated = False
@@ -384,6 +402,7 @@ class OdysseusClient:
             self.model = "default"
 
     def complete(self, prompt: str) -> str:
+        formatted_prompt = f"User request: {prompt}"
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream, application/json",
@@ -406,9 +425,10 @@ class OdysseusClient:
             except Exception:
                 pass
 
+        # Full 17-field Agentic Payload
         chat_payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": f"User request: {prompt}"}],
+            "messages": [{"role": "user", "content": formatted_prompt}],
             "chat_id": self.session_id,
             "session_id": self.session_id,
             "session": self.session_id,
@@ -497,6 +517,21 @@ class OdysseusClient:
             print(f"⚠️ Warning during stream chunk consumption: {parse_chunk_err}")
 
         raw_out = "".join(text_parts).strip()
+        
+        # Fallback to standard json read if SSE streaming yielded nothing
+        if not raw_out:
+            try:
+                data = response.json()
+                raw_out = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    or data.get("content", "")
+                    or ""
+                )
+            except Exception:
+                pass
+
         out = clean_model_output(raw_out)
 
         if len(out.encode("utf-8", errors="ignore")) > MAX_PAYLOAD_SIZE_BYTES:
@@ -530,7 +565,9 @@ def notify_odysseus(prompt: str, response: str):
         pass
 
     try:
-        os.makedirs(os.path.dirname(ODYSSEUS_LOG_PATH), exist_ok=True)
+        log_dir = os.path.dirname(ODYSSEUS_LOG_PATH)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         with open(ODYSSEUS_LOG_PATH, "a", encoding="utf-8") as file:
             file.write(f"### Prompt:\n{prompt}\n\n### Agent Output:\n{response}\n\n---\n")
     except OSError:
@@ -557,7 +594,7 @@ def main():
     base_sleep_time = 3.0
     max_sleep_time = 30.0
 
-    while True:
+    while not should_exit:
         try:
             raw_output = call_canister("getPendingPrompt")
             task = parse_candid_pending_task(raw_output)
@@ -598,6 +635,8 @@ def main():
             backoff_delay = min(max_sleep_time, base_sleep_time * (1.5 ** (poll_error_count - 1)))
             print(f"⚠️ Poller Warning (Attempt {poll_error_count}): {type(error).__name__}: {error}. Backing off for {backoff_delay:.1f}s...", flush=True)
             time.sleep(backoff_delay)
+
+    print("Daemon stopped cleanly.")
 
 
 if __name__ == "__main__":

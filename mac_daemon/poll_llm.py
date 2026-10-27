@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ICfirewall Agentic Daemon (Full Setup Wizard with Backend/Frontend Canister IDs & Master PID Persistence)
+ICfirewall Agentic Daemon (Full Setup Wizard with Backend/Frontend Canister IDs, Controller Check, & Master PID Persistence)
 """
 
 import json
@@ -265,19 +265,34 @@ def setup_wizard() -> tuple[str, str, str, dict]:
 
     DFX_NETWORK = os.getenv("DFX_NETWORK", "ic").lower()
 
-    # --- Identity Configuration & Master Principal Setup ---
+    # --- Identity & Principal Controller Check ---
     print("\n--------------------------------------------------")
-    print("         👑 Master Principal ID Setup            ")
+    print("         🔑 Dfx Identity & Controller Setup       ")
     print("--------------------------------------------------")
     detected_principal = ""
     if os.path.exists(DFX_BIN):
         try:
             ACTIVE_IDENTITY = run_cmd([DFX_BIN, "identity", "whoami"])
             detected_principal = run_cmd([DFX_BIN, "identity", "get-principal"])
-            print(f"🔑 Detected Dfx Identity: '{ACTIVE_IDENTITY}' ({detected_principal})")
-        except Exception:
-            pass
+            print(f"🔑 Active Dfx Identity: '{ACTIVE_IDENTITY}'")
+            print(f"📌 Principal ID (PID): {detected_principal}")
+        except Exception as e:
+            print(f"⚠️ Could not resolve Dfx identity principal: {e}")
 
+    if detected_principal:
+        print("\n👉 ACTION REQUIRED:")
+        print(f"Please ensure principal '{detected_principal}' is added as a controller to your canisters:")
+        if BACKEND_CANISTER_ID:
+            print(f"   • Backend Canister: {BACKEND_CANISTER_ID}")
+        if selected_frontend_id:
+            print(f"   • Frontend Canister: {selected_frontend_id}")
+        print("   (Command: dfx canister update-settings --controller <PID> <canister_name_or_id>)")
+        input("\nPress Enter once you have verified or added this principal as a controller...")
+
+    # --- Master Principal ID Setup ---
+    print("\n--------------------------------------------------")
+    print("         👑 Master Principal ID Setup            ")
+    print("--------------------------------------------------")
     saved_master_pid = data["relay_backend"].get("master_pid", detected_principal)
     master_pid_prompt = f"Master Principal ID [{saved_master_pid}]: "
     master_pid_input = input(master_pid_prompt).strip()

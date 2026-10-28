@@ -4,6 +4,7 @@ import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
+import Char "mo:base/Char";
 import RBTree "mo:base/RBTree";
 import Buffer "mo:base/Buffer";
 
@@ -62,6 +63,10 @@ actor RelayBackend {
     upgrade : ?Bool;
   };
 
+  // --- Constants & System Caps ---
+  private let MAX_QUEUE_LIMIT : Nat = 200;
+  private let HARD_MAX_PROMPT : Nat = 20000;
+
   // --- Stable State ---
   stable var currentMode : FirewallMode = #Medium;
   stable var totalProcessed : Nat = 0;
@@ -69,9 +74,6 @@ actor RelayBackend {
   stable var nextTicketId : Nat = 1;
   stable var latestGlobalResponse : Text = "";
 
-  // To set your master before deploying, uncomment the line below and replace the placeholder.
-  // stable var masterPrincipal : ?Principal = ?Principal.fromText("YOUR_MASTER_PRINCIPAL_ID_HERE");
-  // Leaving it null means the first caller of claimMasterPID becomes master — NOT recommended for production.
   stable var masterPrincipal : ?Principal = null;
   stable var daemonPrincipal : ?Principal = null;
   stable var adminPrincipals : [Principal] = [];
@@ -130,39 +132,255 @@ actor RelayBackend {
     false
   };
 
-  private func scanForThreats(payload : Text) : ?(Text, Text) {
-    let lower = Text.toLowercase(payload);
+  // ============================================================
+  // TAMPERPROOF ON-CHAIN NORMALIZATION & THREAT ENGINE
+  // ============================================================
+
+  private func collapseWhitespace(t : Text) : Text {
+    var result = "";
+    var lastWasSpace = true;
+    for (c in t.chars()) {
+      let code = Char.toNat32(c);
+      let isWs = 
+        code == 0x20 or code == 0x09 or code == 0x0A or code == 0x0D or 
+        code == 0x0B or code == 0x0C or code == 0xA0 or code == 0x85 or
+        code == 0x1680 or code == 0x2028 or code == 0x2029 or
+        (code >= 0x2000 and code <= 0x200A) or 
+        code == 0x202F or code == 0x205F or code == 0x3000;
+
+      if (isWs) {
+        if (not lastWasSpace) {
+          result #= " ";
+          lastWasSpace := true;
+        };
+      } else {
+        result #= Text.fromChar(c);
+        lastWasSpace := false;
+      };
+    };
+    result
+  };
+
+  private func stripZeroWidth(t : Text) : Text {
+    var result = "";
+    for (c in t.chars()) {
+      let code = Char.toNat32(c);
+      let isZeroWidth =
+        code == 0x200B or  // zero-width space
+        code == 0x200C or  // zero-width non-joiner
+        code == 0x200D or  // zero-width joiner
+        code == 0xFEFF or  // BOM / zero-width no-break space
+        code == 0x00AD or  // soft hyphen
+        code == 0x200E or  // LRM
+        code == 0x200F or  // RLM
+        code == 0x2060 or  // word joiner
+        (code >= 0x202A and code <= 0x202E) or // bidi overrides
+        (code >= 0x2066 and code <= 0x2069);    // directional isolates
+      if (not isZeroWidth) {
+        result #= Text.fromChar(c);
+      };
+    };
+    result
+  };
+
+  private func normalizeForScan(t : Text) : Text {
+    var folded = "";
+    for (c in t.chars()) {
+      let code = Char.toNat32(c);
+      if (code >= 0xFF01 and code <= 0xFF5E) {
+        folded #= Text.fromChar(Char.fromNat32(code - 0xFEE0));
+      } else {
+        folded #= Text.fromChar(c);
+      };
+    };
+
+    var s = Text.toLowercase(folded);
+    s := stripZeroWidth(s);
+    s := Text.replace(s, #text "${ifs}", " ");
+    s := Text.replace(s, #text "$ifs", " ");
+    s := Text.replace(s, #text "\\t", " ");
+    s := Text.replace(s, #text "\\n", " ");
+    s := collapseWhitespace(s);
+    s
+  };
+
+  private func shellView(t : Text) : Text {
+    var r = "";
+    for (c in t.chars()) {
+      let k = Char.toNat32(c);
+      let keep =
+        (k >= 0x61 and k <= 0x7A) or (k >= 0x30 and k <= 0x39) or
+        k == 0x20 or k == 0x2D or k == 0x2F or k == 0x2E or k == 0x3D or k == 0x5F or k > 0x7F;
+      if (keep) { r #= Text.fromChar(c) } else { r #= " " };
+    };
+    " " # collapseWhitespace(r) # " "
+  };
+
+  private func hit(a : Text, b : Text, p : Text) : Bool {
+    Text.contains(a, #text p) or Text.contains(b, #text p)
+  };
+
+  private func containsWord(haystack : Text, word : Text) : Bool {
+    if (haystack == word) { return true };
+    if (Text.startsWith(haystack, #text (word # " "))) { return true };
+    if (Text.endsWith(haystack, #text (" " # word))) { return true };
+    if (Text.contains(haystack, #text (" " # word # " "))) { return true };
+    false
+  };
+
+  private func deleet(t : Text) : Text {
+    var result = "";
+    for (c in t.chars()) {
+      let code = Char.toNat32(c);
+      let normalized : Char =
+        if (code == 0x30) { 'o' }
+        else if (code == 0x31) { 'i' }
+        else if (code == 0x33) { 'e' }
+        else if (code == 0x34) { 'a' }
+        else if (code == 0x35) { 's' }
+        else if (code == 0x37) { 't' }
+        else if (code == 0x40) { 'a' }
+        else { c };
+      result #= Text.fromChar(normalized);
+    };
+    result
+  };
+
+  private let DESTRUCTIVE_PATTERNS : [Text] = [
+    "rm -rf", "rm -fr", "rm -r -f", "rm -f -r",
+    "rm --recursive", "rm --force", "rm -rf /", "rm -rf ~",
+    "del /s", "del /q", "deltree", "rmdir /s",
+    "format c:", "mkfs.", " dd if=", " dd of=",
+    ">/dev/sda", ">/dev/nvme", "drop database", "drop table",
+    "truncate table", "shutdown -h", "shutdown now",
+    "shutdown /s", "reboot now", "init 0", "poweroff now",
+    ":(){:|:&};:"
+  ];
+
+  private let ON_DESTRUCTIVE_PATTERNS : [Text] = [
+    "delete from "
+  ];
+
+  private let INJECTION_PATTERNS : [Text] = [
+    "system override", "disregard all prior", "disregard all previous",
+    "ignore previous instructions", "ignore all previous", "jailbreak",
+    "dan mode", "do anything now", "bypass rules", "bypass safety",
+    "new instructions:"
+  ];
+
+  private let STRICT_INJECTION_PATTERNS : [Text] = [
+    "you are now", "pretend to be", "act as if", "roleplay as"
+  ];
+
+  private let PRIVILEGE_PATTERNS : [Text] = [
+    "sudo sh", "sudo bash", "sudo su", "sudo -i", "su root",
+    "chmod 777", "chown root", "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+    "visudo", "reverse shell", " nc -e"
+  ];
+
+  private func scanForThreatsMedium(payload : Text) : ?(Text, Text) {
+    let normalized = normalizeForScan(payload);
+    let view = shellView(normalized);
+
     if (securityRulesConfig.maxContextLength > 0 and Text.size(payload) > securityRulesConfig.maxContextLength) {
       return ?("Context Overflow Blocked", "MEDIUM");
     };
+
     if (securityRulesConfig.blockPromptInjection) {
-      if (Text.contains(lower, #text "system override") or
-          Text.contains(lower, #text "disregard all prior")) {
-        return ?("Prompt Injection Blocked", "CRITICAL");
-      } else if (Text.contains(lower, #text "ignore previous instructions") or
-                 Text.contains(lower, #text "jailbreak") or
-                 Text.contains(lower, #text "bypass rules")) {
-        return ?("Prompt Injection Blocked", "HIGH");
+      for (p in INJECTION_PATTERNS.vals()) {
+        if (hit(normalized, view, p)) {
+          return ?("Prompt Injection Blocked", "HIGH");
+        };
       };
     };
+
     if (securityRulesConfig.blockDestructiveCommands) {
-      if (Text.contains(lower, #text "rm -rf") or
-          Text.contains(lower, #text "drop table") or
-          Text.contains(lower, #text "format disk") or
-          Text.contains(lower, #text "mkfs") or
-          Text.contains(lower, #text "truncate table")) {
-        return ?("Destructive Command Blocked", "CRITICAL");
+      for (p in DESTRUCTIVE_PATTERNS.vals()) {
+        if (hit(normalized, view, p)) {
+          return ?("Destructive Command Blocked", "CRITICAL");
+        };
       };
     };
+
     if (securityRulesConfig.blockPrivilegeEscalation) {
-      if (Text.contains(lower, #text "sudo ") or
-          Text.contains(lower, #text "/etc/passwd") or
-          Text.contains(lower, #text "/etc/shadow") or
-          Text.contains(lower, #text "chmod 777") or
-          Text.contains(lower, #text "chown root")) {
+      for (p in PRIVILEGE_PATTERNS.vals()) {
+        if (hit(normalized, view, p)) {
+          return ?("Privilege Escalation Blocked", "CRITICAL");
+        };
+      };
+      if (containsWord(view, "sudo")) {
         return ?("Privilege Escalation Blocked", "CRITICAL");
       };
     };
+
+    null
+  };
+
+  private func scanForThreatsOn(payload : Text) : ?(Text, Text) {
+    var maxLen = securityRulesConfig.maxContextLength;
+    if (maxLen == 0 or maxLen > HARD_MAX_PROMPT) { maxLen := HARD_MAX_PROMPT };
+    if (maxLen > 4000) { maxLen := 4000 };
+
+    if (Text.size(payload) > maxLen) {
+      return ?("Context Overflow (Strict limit)", "HIGH");
+    };
+
+    switch (scanForThreatsMedium(payload)) {
+      case (?threat) { return ?threat };
+      case (null) {};
+    };
+
+    let normalized = normalizeForScan(payload);
+    let view = shellView(normalized);
+
+    if (securityRulesConfig.blockPromptInjection) {
+      for (p in STRICT_INJECTION_PATTERNS.vals()) {
+        if (hit(normalized, view, p)) {
+          return ?("Prompt Injection (Strict)", "HIGH");
+        };
+      };
+    };
+
+    for (p in ON_DESTRUCTIVE_PATTERNS.vals()) {
+      if (hit(normalized, view, p)) {
+        return ?("Destructive Command Blocked", "CRITICAL");
+      };
+    };
+
+    let deleeted = deleet(normalized);
+    let deleetedView = shellView(deleeted);
+
+    if (deleeted != normalized) {
+      for (p in INJECTION_PATTERNS.vals()) {
+        if (hit(deleeted, deleetedView, p)) {
+          return ?("Prompt Injection (Obfuscated)", "CRITICAL");
+        };
+      };
+      for (p in DESTRUCTIVE_PATTERNS.vals()) {
+        if (hit(deleeted, deleetedView, p)) {
+          return ?("Destructive Command (Obfuscated)", "CRITICAL");
+        };
+      };
+      for (p in ON_DESTRUCTIVE_PATTERNS.vals()) {
+        if (hit(deleeted, deleetedView, p)) {
+          return ?("Destructive Command (Obfuscated)", "CRITICAL");
+        };
+      };
+      for (p in PRIVILEGE_PATTERNS.vals()) {
+        if (hit(deleeted, deleetedView, p)) {
+          return ?("Privilege Escalation (Obfuscated)", "CRITICAL");
+        };
+      };
+      if (containsWord(deleetedView, "sudo")) {
+        return ?("Privilege Escalation (Obfuscated)", "CRITICAL");
+      };
+      for (p in STRICT_INJECTION_PATTERNS.vals()) {
+        if (hit(deleeted, deleetedView, p)) {
+          return ?("Prompt Injection (Obfuscated Strict)", "HIGH");
+        };
+      };
+    };
+
     null
   };
 
@@ -198,6 +416,9 @@ actor RelayBackend {
 
   public shared(msg) func claimMasterPID(pidText : Text) : async Text {
     let caller = msg.caller;
+    if (Principal.isAnonymous(caller)) {
+      return "Error: Anonymous principal cannot claim master ownership.";
+    };
     switch (masterPrincipal) {
       case (?m) {
         if (m != caller) { return "Error: Master Principal already claimed."; };
@@ -231,7 +452,10 @@ actor RelayBackend {
     }
   };
 
-  public query func getAdmins() : async [Text] {
+  public shared query(msg) func getAdmins() : async [Text] {
+    if (not isAdminOrMaster(msg.caller)) {
+      return [];
+    };
     let buf = Buffer.Buffer<Text>(adminPrincipals.size());
     for (admin in adminPrincipals.vals()) {
       buf.add(Principal.toText(admin));
@@ -314,7 +538,11 @@ actor RelayBackend {
           return null;
         };
       };
-      case (null) {};
+      case (null) {
+        if (not isAdminOrMaster(msg.caller)) {
+          return null;
+        }
+      };
     };
     
     if (promptQueueBuffer.size() == 0) {
@@ -340,7 +568,11 @@ actor RelayBackend {
           return "Unauthorized: Daemon/Admin only.";
         };
       };
-      case (null) {};
+      case (null) {
+        if (not isAdminOrMaster(msg.caller)) {
+          return "Unauthorized: Daemon/Admin only.";
+        }
+      };
     };
     resultsMap.put(ticket, result);
     resultTimestamps.put(ticket, Time.now());
@@ -369,6 +601,21 @@ actor RelayBackend {
   public shared(msg) func processPrompt(textBody : Text) : async PromptResult {
     let activeMode = getModeString();
     let now = Time.now();
+
+    var maxLen = securityRulesConfig.maxContextLength;
+    if (maxLen == 0 or maxLen > HARD_MAX_PROMPT) { maxLen := HARD_MAX_PROMPT };
+    if (currentMode == #On and maxLen > 4000) { maxLen := 4000 };
+
+    if (Text.size(textBody) > maxLen) {
+      return {
+        allowed = false;
+        mode = activeMode;
+        response = "BLOCKED: Prompt exceeds maximum permitted context length.";
+        reason = "Context Overflow";
+        ticketId = null;
+      };
+    };
+
     if (now - lastPromptTime < 100_000_000) {
       return {
         allowed = false;
@@ -378,22 +625,47 @@ actor RelayBackend {
         ticketId = null;
       };
     };
+
+    if (promptQueueBuffer.size() >= MAX_QUEUE_LIMIT) {
+      return {
+        allowed = false;
+        mode = activeMode;
+        response = "BLOCKED: System queue at maximum capacity.";
+        reason = "Capacity cap reached.";
+        ticketId = null;
+      };
+    };
+
     lastPromptTime := now;
     totalProcessed += 1;
 
     switch (currentMode) {
       case (#On) {
-        logThreat("Execution Lockout", "HIGH", previewText(textBody, 40));
-        {
-          allowed = false;
-          mode = activeMode;
-          response = "BLOCKED: System Locked (ON boundary active).";
-          reason = "Execution Lockout active in ON posture.";
-          ticketId = null;
+        switch (scanForThreatsOn(textBody)) {
+          case (?(threat, severity)) {
+            logThreat(threat, severity, previewText(textBody, 40));
+            {
+              allowed = false;
+              mode = activeMode;
+              response = "BLOCKED: " # threat;
+              reason = threat;
+              ticketId = null;
+            }
+          };
+          case (null) {
+            let tid = enqueuePrompt(textBody);
+            {
+              allowed = true;
+              mode = activeMode;
+              response = "QUEUED: Prompt forwarded to authenticated daemon queue.";
+              reason = "Passed strict heuristic filters.";
+              ticketId = ?tid;
+            }
+          };
         }
       };
       case (#Medium) {
-        switch (scanForThreats(textBody)) {
+        switch (scanForThreatsMedium(textBody)) {
           case (?(threat, severity)) {
             logThreat(threat, severity, previewText(textBody, 40));
             {
@@ -429,7 +701,10 @@ actor RelayBackend {
     }
   };
 
-  public query func getThreats() : async [ThreatEvent] {
+  public shared query(msg) func getThreats() : async [ThreatEvent] {
+    if (not isAdminOrMaster(msg.caller)) {
+      return [];
+    };
     let buf = Buffer.Buffer<ThreatEvent>(threatLog.size());
     for (item in threatLog.vals()) {
       switch (item) {

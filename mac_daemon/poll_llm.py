@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ICfirewall Agentic Daemon (Full Setup Wizard with Backend/Frontend Canister IDs, Controller Check, & Fixed JSON Master PID Parsing)
+ICfirewall Agentic Daemon (Public Release - Configurable via Setup Wizard & Environment)
 """
 
 import json
@@ -38,10 +38,10 @@ ODYSSEUS_LOG_PATH = os.path.expanduser(
     os.getenv("ODYSSEUS_LOG_PATH", "~/Desktop/Odysseus_Remote_Log.md")
 )
 
-# Global runtime variables set during setup wizard
+# Global runtime variables (Configurable via environment or setup wizard)
 BACKEND_CANISTER_ID = DEFAULT_IC_CANISTER_ID
-DFX_NETWORK = "ic"
-ACTIVE_IDENTITY = "default"
+DFX_NETWORK = os.getenv("DFX_NETWORK", "ic")
+ACTIVE_IDENTITY = os.getenv("ICF_IDENTITY", "default")
 
 should_exit = False
 
@@ -272,22 +272,12 @@ def setup_wizard() -> tuple[str, str, str, dict]:
     detected_principal = ""
     if os.path.exists(DFX_BIN):
         try:
-            ACTIVE_IDENTITY = run_cmd([DFX_BIN, "identity", "whoami"])
-            detected_principal = run_cmd([DFX_BIN, "identity", "get-principal"])
+            ACTIVE_IDENTITY = os.getenv("ICF_IDENTITY", run_cmd([DFX_BIN, "identity", "whoami"]))
+            detected_principal = run_cmd([DFX_BIN, "identity", "get-principal", "--identity", ACTIVE_IDENTITY])
             print(f"🔑 Active Dfx Identity: '{ACTIVE_IDENTITY}'")
             print(f"📌 Principal ID (PID): {detected_principal}")
         except Exception as e:
             print(f"⚠️ Could not resolve Dfx identity principal: {e}")
-
-    if detected_principal:
-        print("\n👉 ACTION REQUIRED:")
-        print(f"Please ensure principal '{detected_principal}' is added as a controller to your canisters:")
-        if BACKEND_CANISTER_ID:
-            print(f"   • Backend Canister: {BACKEND_CANISTER_ID}")
-        if selected_frontend_id:
-            print(f"   • Frontend Canister: {selected_frontend_id}")
-        print("   (Command: dfx canister update-settings --controller <PID> <canister_name_or_id>)")
-        input("\nPress Enter once you have verified or added this principal as a controller...")
 
     # --- Master Principal ID Setup & Robust On-Chain Registration ---
     print("\n--------------------------------------------------")
@@ -355,7 +345,7 @@ def setup_wizard() -> tuple[str, str, str, dict]:
     odysseus_pass = getpass.getpass(f"Odysseus Password{prompt_pass}: ").strip() or env_pass
 
     env_session = saved_config.get(
-        "session_id", os.getenv("ODYSSEUS_SESSION_ID", "YOUR_ODYSSEUS_SESSION_ID_HERE")
+        "session_id", os.getenv("ODYSSEUS_SESSION_ID", "")
     )
     odysseus_session_input = input(f"Odysseus Session ID [{env_session}]: ").strip()
     odysseus_session = odysseus_session_input if odysseus_session_input else env_session

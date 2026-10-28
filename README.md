@@ -43,3 +43,89 @@ Running natively as a smart contract canister on the Internet Computer (ICP), IC
 ├── dfx.json
 ├── requirements.txt
 └── README.md
+⚙️ Architecture & Execution Flow
+[ iOS Shortcut / Web UI ]
+         │
+         │ (Authenticated call via Internet Identity)
+         ▼
+[ ICP Canister: ICfirewall ]
+  ├── 1. Verify Principal (Master / Admin / Daemon)
+  ├── 2. Apply Boundary Mode + Multi-layer Threat Scan
+  └── 3. Queue validated prompt (or reject)
+         │
+         │ (Daemon polls getPendingPrompt)
+         ▼
+[ Local Python Daemon (poll_llm.py) ]
+  ├── 1. Fetch pending prompt
+  ├── 2. Send to local LLM / Odysseus
+  └── 3. Write result back via saveResult
+🛠️ Quick Start & Setup
+Prerequisites
+	•	dfx (v0.24.3 or higher)
+	•	Python 3.10+ (pip install requests)
+	•	Local LLM runner (Odysseus, Ollama, LM Studio, etc.)
+	•	Internet Identity (for master/admin access)
+1. Deploy the Canister
+git clone https://github.com/iTechBod/ICfirewall.git
+cd ICfirewall
+
+# Local
+dfx start --background
+dfx deploy
+
+# Mainnet
+dfx deploy --network ic
+Critical first steps after deploy:
+# Claim master ownership immediately (race condition protection)
+dfx canister call relay_backend claimMasterPID '("YOUR_PRINCIPAL_ID")'
+
+# Authorize your daemon identity
+dfx canister call relay_backend setDaemonPrincipal '("DAEMON_PRINCIPAL_ID")'
+2. Configure & Run the Local Daemon
+Create odysseus_config.json in the project root (or let the wizard create it):
+{
+  "url": "http://127.0.0.1:7860",
+  "username": "",
+  "password": "",
+  "session_id": "YOUR_SESSION_ID"
+}
+Start the daemon:
+python3 mac_daemon/poll_llm.py
+The setup wizard will guide you through canister ID and identity configuration.
+🛡️ Security Boundary Modes
+Mode
+Visual
+Filtering Rigor
+Best Used For
+OFF
+Cyan
+None
+Local testing / raw model evaluation
+MEDIUM
+Emerald
+Balanced multi-layer heuristics
+Daily use, good security/speed balance
+ON
+Crimson
+Strict + deobfuscation + extra patterns
+High-security / untrusted inputs
+Mode Details
+	•	OFF No scanning. Everything is queued. Use only in trusted local environments.
+	•	MEDIUM Full normalization pipeline + pattern matching against injection, destructive commands, and privilege escalation. Suitable for everyday use.
+	•	ON Everything in Medium plus:
+	◦	Harder character limits (max 4000 chars)
+	◦	Extra strict injection patterns
+	◦	Full leetspeak + shell-view scanning
+	◦	Additional destructive patterns
+📡 Security Model
+	•	Master Claim: First non-anonymous principal to call claimMasterPID becomes immutable master. Anonymous principals are rejected.
+	•	Daemon Authorization: getPendingPrompt and saveResult are fail-closed. Only the authorized daemon principal (or admin/master) can access them.
+	•	Queue Protection: Hard limit of 200 pending prompts.
+	•	Prompt Size Caps: Absolute maximum 20 000 characters (forced to 4 000 in ON mode).
+	•	HTTP Lockdown: Raw HTTP endpoints return 404. All interaction goes through authenticated actor methods.
+	•	Threat Engine: Multi-stage normalization (full-width folding, zero-width stripping, whitespace collapsing, shell-view) + pattern matching + leetspeak deobfuscation.
+☕ Support & Community
+	•	Official Creator Hub: https://2n2uw-uaaaa-aaaag-at2hq-cai.icp.net
+	•	Built with ♥ on the Internet Computer Protocol
+
+Disclaimer This is a personal project and has not been professionally security-audited. Review the authorization model, threat engine, and upgrade path carefully before deploying to mainnet or using with sensitive data.

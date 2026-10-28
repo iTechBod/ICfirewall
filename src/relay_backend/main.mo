@@ -74,6 +74,7 @@ actor RelayBackend {
   stable var nextTicketId : Nat = 1;
   stable var latestGlobalResponse : Text = "";
 
+  // Unassigned by default; claimed dynamically via claimMasterPID during setup
   stable var masterPrincipal : ?Principal = null;
   stable var daemonPrincipal : ?Principal = null;
   stable var adminPrincipals : [Principal] = [];

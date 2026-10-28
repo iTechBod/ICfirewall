@@ -9,6 +9,19 @@
   --blue: #5b8cff;
   --coral: #ff7b76;
   --amber: #f7b267;
+  --emerald: #79e4a5;
+  --mode-accent: var(--blue);
+}
+
+/* Dynamic Mode Visual Indicator Theme Overrides */
+body.mode-off-active {
+  --mode-accent: var(--cyan);
+}
+body.mode-medium-active {
+  --mode-accent: var(--emerald);
+}
+body.mode-on-active {
+  --mode-accent: var(--coral);
 }
 
 * {
@@ -28,6 +41,7 @@ body {
   font-family: 'Manrope', sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+  transition: background-color 0.4s ease;
 }
 
 body::before {
@@ -36,9 +50,10 @@ body::before {
   z-index: -2;
   background: 
     radial-gradient(circle at 14% 4%, rgba(91, 140, 255, 0.14), transparent 28%),
-    radial-gradient(circle at 88% 34%, rgba(103, 232, 249, 0.08), transparent 26%),
+    radial-gradient(circle at 88% 34%, var(--mode-accent), transparent 26%),
     linear-gradient(130deg, #08090c 0%, #0d1016 54%, #090b10 100%);
   content: '';
+  transition: background 0.5s ease;
 }
 
 body::after {
@@ -75,8 +90,9 @@ body::after {
 .ambient-two {
   right: -150px;
   bottom: 8%;
-  background: var(--cyan);
+  background: var(--mode-accent);
   animation-delay: -5s;
+  transition: background 0.5s ease;
 }
 
 .shell {
@@ -114,18 +130,20 @@ body::after {
   width: 31px;
   height: 31px;
   place-items: center;
-  border: 1px solid rgba(103, 232, 249, 0.6);
+  border: 1px solid var(--mode-accent);
   border-radius: 9px;
   transform: rotate(45deg);
-  box-shadow: 0 0 22px rgba(103, 232, 249, 0.2);
+  box-shadow: 0 0 22px var(--mode-accent);
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
 }
 
 .brand-mark span {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--cyan);
-  box-shadow: 0 0 13px var(--cyan);
+  background: var(--mode-accent);
+  box-shadow: 0 0 13px var(--mode-accent);
+  transition: background 0.4s ease, box-shadow 0.4s ease;
 }
 
 .brand strong {
@@ -190,7 +208,7 @@ body::after {
 .typing-indicator {
   display: inline-block;
   font-family: 'DM Mono', monospace;
-  color: var(--cyan);
+  color: var(--mode-accent);
   font-size: 11px;
   animation: pulse 1.5s infinite;
 }
@@ -221,7 +239,7 @@ body::after {
 }
 
 .interactive-btn:hover {
-  border-color: rgba(103, 232, 249, 0.4);
+  border-color: var(--mode-accent);
   background: rgba(255, 255, 255, 0.06);
 }
 
@@ -230,9 +248,10 @@ body::after {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--cyan);
-  box-shadow: 0 0 0 4px rgba(103, 232, 249, 0.1), 0 0 14px var(--cyan);
+  background: var(--mode-accent);
+  box-shadow: 0 0 0 4px rgba(103, 232, 249, 0.1), 0 0 14px var(--mode-accent);
   animation: breathe 2s ease-in-out infinite;
+  transition: background 0.4s ease, box-shadow 0.4s ease;
 }
 
 .hero-row {
@@ -248,9 +267,10 @@ body::after {
 
 .eyebrow,
 .section-kicker {
-  color: var(--cyan);
+  color: var(--mode-accent);
   font: 500 10px 'DM Mono', monospace;
   letter-spacing: 0.17em;
+  transition: color 0.4s ease;
 }
 
 .eyebrow {
@@ -263,8 +283,9 @@ body::after {
 .eyebrow-line {
   width: 28px;
   height: 1px;
-  background: var(--cyan);
-  box-shadow: 0 0 10px var(--cyan);
+  background: var(--mode-accent);
+  box-shadow: 0 0 10px var(--mode-accent);
+  transition: background 0.4s ease, box-shadow 0.4s ease;
 }
 
 h1 {
@@ -276,8 +297,9 @@ h1 {
 }
 
 h1 em {
-  color: var(--cyan);
+  color: var(--mode-accent);
   font-style: normal;
+  transition: color 0.4s ease;
 }
 
 .hero-description {
@@ -370,7 +392,7 @@ h2 {
 }
 
 .studio-input:focus {
-  border-color: rgba(103, 232, 249, 0.5);
+  border-color: var(--mode-accent);
 }
 
 .toggle-label {
@@ -383,7 +405,7 @@ h2 {
 }
 
 .toggle-label input[type="checkbox"] {
-  accent-color: var(--cyan);
+  accent-color: var(--mode-accent);
   width: 15px;
   height: 15px;
   cursor: pointer;
@@ -420,13 +442,13 @@ h2 {
 }
 
 .mode-button:hover {
-  border-color: rgba(103, 232, 249, 0.38);
+  border-color: var(--mode-accent);
   transform: translateY(-2px);
 }
 
 .mode-button.active {
   color: var(--ink);
-  border-color: rgba(103, 232, 249, 0.62);
+  border-color: var(--mode-accent);
   background: linear-gradient(110deg, rgba(103, 232, 249, 0.14), rgba(91, 140, 255, 0.06));
   box-shadow: 0 0 28px rgba(103, 232, 249, 0.08);
 }
@@ -487,18 +509,18 @@ h2 {
 }
 
 .orb-off {
-  background: var(--coral);
-  box-shadow: 0 0 11px rgba(255, 123, 118, 0.65);
+  background: var(--cyan);
+  box-shadow: 0 0 11px rgba(103, 232, 249, 0.65);
 }
 
 .orb-medium {
-  background: var(--amber);
-  box-shadow: 0 0 11px rgba(247, 178, 103, 0.65);
+  background: var(--emerald);
+  box-shadow: 0 0 11px rgba(121, 228, 165, 0.65);
 }
 
 .orb-on {
-  background: var(--cyan);
-  box-shadow: 0 0 11px rgba(103, 232, 249, 0.65);
+  background: var(--coral);
+  box-shadow: 0 0 11px rgba(255, 123, 118, 0.65);
 }
 
 .mode-arrow {
@@ -575,7 +597,7 @@ h2 {
 }
 
 .chat-input-wrap textarea:focus {
-  border-color: rgba(103, 232, 249, 0.5);
+  border-color: var(--mode-accent);
 }
 
 .chat-actions {
@@ -594,7 +616,7 @@ h2 {
 
 .send-btn:hover {
   background: rgba(103, 232, 249, 0.18);
-  border-color: var(--cyan);
+  border-color: var(--mode-accent);
 }
 
 .send-btn:disabled {
@@ -627,8 +649,9 @@ h2 {
 }
 
 .stat-icon {
-  color: var(--cyan);
+  color: var(--mode-accent);
   font-size: 17px;
+  transition: color 0.4s ease;
 }
 
 .stat-card p {

@@ -6,13 +6,13 @@ const isLocalReplica =
   window.location.hostname === 'localhost' ||
   window.location.hostname === '127.0.0.1';
 
-const CANISTER_ID = window.ICF_CANISTER_ID || 'YOUR_PRODUCTION_CANISTER_ID_HERE';
+const CANISTER_ID = window.ICF_CANISTER_ID || 'bd3sg-teaaa-aaaaa-qaaba-cai';
 const HOST = isLocalReplica ? 'http://localhost:4943' : 'https://icp0.io';
 const II_URL = isLocalReplica
   ? 'http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:4943'
-  : 'https://id.ai';
+  : 'https://identity.internetcomputer.org';
 
-const STORAGE_KEY = 'cortex_mesh_chat_history_v1';
+const STORAGE_KEY = 'icfirewall_chat_history_v1';
 
 const idlFactory = ({ IDL }) => {
   const SystemStats = IDL.Record({
@@ -137,7 +137,7 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// 2. Coffee button
+// 2. Master PID Copy Button
 coffeeBtn?.addEventListener('click', async () => {
   try {
     const master = await actor.getMasterPID();
@@ -152,9 +152,9 @@ coffeeBtn?.addEventListener('click', async () => {
   }
 });
 
-// 3. Dev website button
+// 3. Creator Hub button
 devWebsiteBtn?.addEventListener('click', () => {
-  window.open('https://YOUR_DEV_WEBSITE_URL_HERE', '_blank');
+  window.open('https://2n2uw-uaaaa-aaaag-at2hq-cai.icp.net', '_blank');
 });
 
 // 4. Copy PID button
@@ -191,6 +191,18 @@ function setModeButtonsDisabled(disabled) {
   });
 }
 
+// Apply active mode theme class to body for visual indicator synchronization
+function applyModeVisualTheme(normalizedMode) {
+  document.body.classList.remove('mode-off-active', 'mode-medium-active', 'mode-on-active');
+  if (normalizedMode === 'off') {
+    document.body.classList.add('mode-off-active');
+  } else if (normalizedMode === 'medium') {
+    document.body.classList.add('mode-medium-active');
+  } else if (normalizedMode === 'on') {
+    document.body.classList.add('mode-on-active');
+  }
+}
+
 // 7. Set mode function
 async function setMode(mode) {
   if (modeRequestInFlight) return;
@@ -204,6 +216,7 @@ async function setMode(mode) {
       throw new Error(res);
     }
     setModeFeedback(`Mode updated to ${mode}`, 'success');
+    applyModeVisualTheme(mode.toLowerCase());
     await refreshDashboard(false);
   } catch (e) {
     setModeFeedback(`Failed to update mode: ${e.message}`, 'error');
@@ -239,6 +252,8 @@ async function refreshStats(showFeedback = false) {
     modeButtons.forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.mode === map[normalized]);
     });
+
+    applyModeVisualTheme(normalized);
 
     if (showFeedback) {
       setModeFeedback(`Firewall ${stats.mode.toLowerCase()} · synced`, 'success');

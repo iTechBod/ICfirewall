@@ -2,7 +2,8 @@
   "canisters": {
     "relay_backend": {
       "main": "src/relay_backend/main.mo",
-      "type": "motoko"
+      "type": "motoko",
+      "packtool": "mops sources"
     },
     "relay_frontend": {
       "dependencies": ["relay_backend"],
@@ -12,7 +13,7 @@
   },
   "defaults": {
     "build": {
-      "packtool": ""
+      "packtool": "mops sources"
     }
   },
   "networks": {

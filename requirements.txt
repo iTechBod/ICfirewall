@@ -22,6 +22,9 @@ fastapi>=0.109.0              # Async web framework for local boundary gateway A
 uvicorn>=0.27.0               # ASGI server worker for running local API boundaries
 regex>=2023.12.25             # Advanced regex engine for strict prompt injection sanitization
 
+# --- E2EE Cryptography & Secure Vault Layer ---
+cryptography>=41.0.0          # AES-GCM primitives for v7.0 client/daemon payload encryption
+
 # --- iOS Shortcuts & Pythonista Automation Helpers ---
 requests>=2.31.0              # Synchronous HTTP library for external API fetching
 httpx>=0.27.0                 # Async HTTP client for streaming LLM responses

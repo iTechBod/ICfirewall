@@ -7,8 +7,47 @@ import Nat "mo:base/Nat";
 import Char "mo:base/Char";
 import RBTree "mo:base/RBTree";
 import Buffer "mo:base/Buffer";
+import Timer "mo:base/Timer";
 
 actor RelayBackend {
+
+  module ManagementCanister {
+    public type Curve = {
+      #bls12_381_g1;
+      #bls12_381_g2;
+    };
+
+    public type KeyId = {
+      curve : Curve;
+      name : Text;
+    };
+
+    public type VetKdPublicKeyRequest = {
+      canister_id : ?Principal;
+      derivation_path : [Blob];
+      key_id : KeyId;
+    };
+
+    public type VetKdPublicKeyResponse = {
+      public_key : Blob;
+    };
+
+    public func vetKdPublicKey(
+      canister_id : ?Principal,
+      derivation_path : Blob,
+      key_id : KeyId
+    ) : async Blob {
+      let mgmt = actor ("aaaaa-aa") : actor {
+        vet_keys_public_key : VetKdPublicKeyRequest -> async VetKdPublicKeyResponse;
+      };
+      let res = await mgmt.vet_keys_public_key({
+        canister_id;
+        derivation_path = [derivation_path];
+        key_id;
+      });
+      res.public_key
+    };
+  };
 
   public type FirewallMode = { #Off; #Medium; #On };
 
@@ -63,24 +102,21 @@ actor RelayBackend {
     upgrade : ?Bool;
   };
 
-  // --- Constants & System Caps ---
   private let MAX_QUEUE_LIMIT : Nat = 200;
   private let HARD_MAX_PROMPT : Nat = 20000;
+  private let RESULT_TTL_NS : Int = 86_400_000_000_000;
 
-  // --- Stable State ---
   stable var currentMode : FirewallMode = #Medium;
   stable var totalProcessed : Nat = 0;
   stable var totalBlocked : Nat = 0;
   stable var nextTicketId : Nat = 1;
-  stable var latestGlobalResponse : Text = "";
 
   stable var masterPrincipal : ?Principal = null;
   stable var daemonPrincipal : ?Principal = null;
   stable var adminPrincipals : [Principal] = [];
   stable var lastPromptTime : Int = 0;
 
-  // Optional empty array for open-source public repository release (configure via setup wizard or dfx identities)
-  private let KNOWN_MASTERS : [Text] = [];
+  private var cleanupTimerId : ?Timer.TimerId = null;
 
   stable var securityRulesConfig : SecurityRulesConfig = {
     blockPromptInjection = true;
@@ -96,6 +132,39 @@ actor RelayBackend {
   private var promptsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
   private var resultsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
   private var resultTimestamps = RBTree.RBTree<Nat, Int>(Nat.compare);
+  private var submittersMap = RBTree.RBTree<Nat, Principal>(Nat.compare);
+
+  private func runCleanup() {
+    let now = Time.now();
+    let expiredKeys = Buffer.Buffer<Nat>(10);
+
+    for (entry in resultTimestamps.entries()) {
+      let (ticket, timestamp) = entry;
+      if (now - timestamp > RESULT_TTL_NS) {
+        expiredKeys.add(ticket);
+      };
+    };
+
+    for (ticket in expiredKeys.vals()) {
+      ignore resultsMap.remove(ticket);
+      ignore resultTimestamps.remove(ticket);
+      ignore submittersMap.remove(ticket);
+      ignore promptsMap.remove(ticket);
+    };
+  };
+
+  system func postupgrade() {
+    switch (cleanupTimerId) {
+      case (?id) { Timer.cancelTimer(id); };
+      case (null) {};
+    };
+    cleanupTimerId := ?Timer.recurringTimer<system>(
+      #seconds 3600,
+      func () : async () {
+        runCleanup();
+      }
+    );
+  };
 
   private func previewText(t : Text, maxLen : Nat) : Text {
     if (t.size() <= maxLen) { return t };
@@ -120,28 +189,21 @@ actor RelayBackend {
     totalBlocked += 1;
   };
 
-  private func isKnownMasterText(pText : Text) : Bool {
-    var found = false;
-    for (m in KNOWN_MASTERS.vals()) {
-      if (m == pText) {
-        found := true;
-      };
-    };
-    found
+  private func getMasterText() : Text {
+    switch (masterPrincipal) {
+      case (?p) { Principal.toText(p) };
+      case (null) { "Unassigned" };
+    }
   };
 
   private func isMaster(p : Principal) : Bool {
-    let pText = Principal.toText(p);
-    if (isKnownMasterText(pText)) { return true };
     switch (masterPrincipal) {
+      case (?mp) { mp == p };
       case (null) { false };
-      case (?m) { m == p };
     }
   };
 
   private func isAdminOrMaster(p : Principal) : Bool {
-    let pText = Principal.toText(p);
-    if (isKnownMasterText(pText)) { return true };
     if (isMaster(p)) { return true };
     for (admin in adminPrincipals.vals()) {
       if (admin == p) { return true };
@@ -149,9 +211,13 @@ actor RelayBackend {
     false
   };
 
-  // ============================================================
-  // TAMPERPROOF ON-CHAIN NORMALIZATION & THREAT ENGINE
-  // ============================================================
+  public shared func getVetKeyPublicKey() : async Blob {
+    await ManagementCanister.vetKdPublicKey(
+      null,
+      Text.encodeUtf8("icfirewall_payload_v7"),
+      { curve = #bls12_381_g2; name = "test_key_1" }
+    )
+  };
 
   private func collapseWhitespace(t : Text) : Text {
     var result = "";
@@ -183,16 +249,9 @@ actor RelayBackend {
     for (c in t.chars()) {
       let code = Char.toNat32(c);
       let isZeroWidth =
-        code == 0x200B or  // zero-width space
-        code == 0x200C or  // zero-width non-joiner
-        code == 0x200D or  // zero-width joiner
-        code == 0xFEFF or  // BOM / zero-width no-break space
-        code == 0x00AD or  // soft hyphen
-        code == 0x200E or  // LRM
-        code == 0x200F or  // RLM
-        code == 0x2060 or  // word joiner
-        (code >= 0x202A and code <= 0x202E) or // bidi overrides
-        (code >= 0x2066 and code <= 0x2069);    // directional isolates
+        code == 0x200B or code == 0x200C or code == 0x200D or code == 0xFEFF or
+        code == 0x00AD or code == 0x200E or code == 0x200F or code == 0x2060 or
+        (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069);
       if (not isZeroWidth) {
         result #= Text.fromChar(c);
       };
@@ -409,25 +468,17 @@ actor RelayBackend {
     }
   };
 
-  private func enqueuePrompt(item : Text) : Nat {
+  private func enqueuePrompt(item : Text, submitter : Principal) : Nat {
     let ticket = nextTicketId;
     nextTicketId += 1;
     promptsMap.put(ticket, item);
+    submittersMap.put(ticket, submitter);
     promptQueueBuffer.add(ticket);
     ticket
   };
 
   public query func getMasterPID() : async Text {
-    switch (masterPrincipal) {
-      case (null) {
-        if (KNOWN_MASTERS.size() > 0) {
-          KNOWN_MASTERS[0]
-        } else {
-          "Unassigned"
-        }
-      };
-      case (?p) { Principal.toText(p) };
-    }
+    getMasterText()
   };
 
   public query func getDaemonPID() : async Text {
@@ -440,10 +491,17 @@ actor RelayBackend {
   public shared(msg) func claimMasterPID(pidText : Text) : async Text {
     let caller = msg.caller;
     if (Principal.isAnonymous(caller)) {
-      return "Error: Anonymous principal cannot claim master ownership.";
+      return "Error: Anonymous principals cannot claim master ownership.";
     };
-    masterPrincipal := ?caller;
-    "Master ownership successfully claimed.";
+    switch (masterPrincipal) {
+      case (?existing) {
+        return "Error: Master principal has already been claimed.";
+      };
+      case (null) {
+        masterPrincipal := ?caller;
+        return "Success! You are now the Master Principal of this canister.";
+      };
+    }
   };
 
   public shared(msg) func setDaemonPrincipal(pidText : Text) : async Text {
@@ -468,7 +526,7 @@ actor RelayBackend {
   };
 
   public shared query(msg) func getAdmins() : async [Text] {
-    if (not isAdminOrMaster(msg.caller)) {
+    if (not isMaster(msg.caller)) {
       return [];
     };
     let buf = Buffer.Buffer<Text>(adminPrincipals.size());
@@ -487,7 +545,10 @@ actor RelayBackend {
       if (isAdminOrMaster(p)) {
         return "Already an admin.";
       };
-      adminPrincipals := Array.append(adminPrincipals, [p]);
+      let newAdmins = Buffer.Buffer<Principal>(adminPrincipals.size() + 1);
+      for (a in adminPrincipals.vals()) { newAdmins.add(a); };
+      newAdmins.add(p);
+      adminPrincipals := Buffer.toArray(newAdmins);
       "Admin added successfully."
     } catch (_) {
       "Error: Invalid Principal format."
@@ -518,20 +579,14 @@ actor RelayBackend {
   };
 
   public shared(msg) func updateSecurityRules(newConfig : SecurityRulesConfig) : async Text {
-    if (not isAdminOrMaster(msg.caller)) {
-      return "Unauthorized: Admin/Master only.";
+    if (not isMaster(msg.caller)) {
+      return "Unauthorized: Master only.";
     };
     securityRulesConfig := newConfig;
     "Security rules updated successfully."
   };
 
   public query func getStats() : async SystemStats {
-    let masterText = switch (masterPrincipal) {
-      case (null) { 
-        if (KNOWN_MASTERS.size() > 0) { KNOWN_MASTERS[0] } else { "Unassigned" }
-      };
-      case (?p) { Principal.toText(p) };
-    };
     let daemonText = switch (daemonPrincipal) {
       case (null) { "Unassigned" };
       case (?p) { Principal.toText(p) };
@@ -542,7 +597,7 @@ actor RelayBackend {
       totalProcessed;
       totalBlocked;
       activeQueueLength = promptQueueBuffer.size();
-      masterPid = masterText;
+      masterPid = getMasterText();
       daemonPid = daemonText;
       adminCount = adminPrincipals.size();
     }
@@ -579,6 +634,9 @@ actor RelayBackend {
   };
 
   public shared(msg) func saveResult(ticket : Nat, result : Text) : async Text {
+    if (Text.size(result) > 64000) {
+      return "Error: Result exceeds 64KB maximum.";
+    };
     switch (daemonPrincipal) {
       case (?d) {
         if (msg.caller != d and not isAdminOrMaster(msg.caller)) {
@@ -593,12 +651,23 @@ actor RelayBackend {
     };
     resultsMap.put(ticket, result);
     resultTimestamps.put(ticket, Time.now());
-    latestGlobalResponse := result;
     return "Result Saved";
   };
 
-  public query func checkResponse(ticket : Nat) : async ?Text {
-    resultsMap.get(ticket)
+  public shared query(msg) func checkResponse(ticket : Nat) : async ?Text {
+    let caller = msg.caller;
+    if (isAdminOrMaster(caller)) {
+      return resultsMap.get(ticket);
+    };
+    switch (submittersMap.get(ticket)) {
+      case (?submitter) {
+        if (submitter == caller) {
+          return resultsMap.get(ticket);
+        };
+      };
+      case (null) {};
+    };
+    null
   };
 
   public shared(msg) func setMode(newModeText : Text) : async Text {
@@ -616,6 +685,16 @@ actor RelayBackend {
   };
 
   public shared(msg) func processPrompt(textBody : Text) : async PromptResult {
+    let caller = msg.caller;
+    if (Principal.isAnonymous(caller)) {
+      return {
+        allowed = false;
+        mode = getModeString();
+        response = "BLOCKED: Anonymous users cannot submit prompts.";
+        reason = "Anonymous Principal Denied";
+        ticketId = null;
+      };
+    };
     let activeMode = getModeString();
     let now = Time.now();
 
@@ -670,7 +749,7 @@ actor RelayBackend {
             }
           };
           case (null) {
-            let tid = enqueuePrompt(textBody);
+            let tid = enqueuePrompt(textBody, caller);
             {
               allowed = true;
               mode = activeMode;
@@ -694,7 +773,7 @@ actor RelayBackend {
             }
           };
           case (null) {
-            let tid = enqueuePrompt(textBody);
+            let tid = enqueuePrompt(textBody, caller);
             {
               allowed = true;
               mode = activeMode;
@@ -706,7 +785,7 @@ actor RelayBackend {
         }
       };
       case (#Off) {
-        let tid = enqueuePrompt(textBody);
+        let tid = enqueuePrompt(textBody, caller);
         {
           allowed = true;
           mode = activeMode;
@@ -719,7 +798,7 @@ actor RelayBackend {
   };
 
   public shared query(msg) func getThreats() : async [ThreatEvent] {
-    if (not isAdminOrMaster(msg.caller)) {
+    if (not isMaster(msg.caller)) {
       return [];
     };
     let buf = Buffer.Buffer<ThreatEvent>(threatLog.size());
@@ -739,4 +818,11 @@ actor RelayBackend {
   public shared func http_request_update(req : HttpRequest) : async HttpResponse {
     { status_code = 404; headers = [("Access-Control-Allow-Origin", "*")]; body = Text.encodeUtf8("Not Found"); upgrade = ?false }
   };
+
+  cleanupTimerId := ?Timer.recurringTimer<system>(
+    #seconds 3600,
+    func () : async () {
+      runCleanup();
+    }
+  );
 };

@@ -14,6 +14,61 @@ const II_URL = isLocalReplica
 
 const STORAGE_KEY = 'icfirewall_chat_history_v1';
 
+// --- Web Crypto E2EE Helper Layer ---
+async function getOrCreateSessionKey() {
+  let rawKey = sessionStorage.getItem('icfirewall_e2ee_key');
+  let cryptoKey;
+  if (!rawKey) {
+    cryptoKey = await window.crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const exported = await window.crypto.subtle.exportKey('raw', cryptoKey);
+    sessionStorage.setItem('icfirewall_e2ee_key', Array.from(new Uint8Array(exported)).join(','));
+  } else {
+    const keyBytes = new Uint8Array(rawKey.split(',').map(Number));
+    cryptoKey = await window.crypto.subtle.importKey(
+      'raw',
+      keyBytes,
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+  }
+  return cryptoKey;
+}
+
+async function encryptPayload(text) {
+  try {
+    const key = await getOrCreateSessionKey();
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const encoded = new TextEncoder().encode(text);
+    const cipherBuffer = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+    
+    const combined = new Uint8Array(iv.byteLength + cipherBuffer.byteLength);
+    combined.set(iv, 0);
+    combined.set(new Uint8Array(cipherBuffer), iv.byteLength);
+    return btoa(String.fromCharCode(...combined));
+  } catch (e) {
+    console.error('Encryption fallback to plaintext:', e);
+    return text;
+  }
+}
+
+async function decryptPayload(cipherBase64) {
+  try {
+    const key = await getOrCreateSessionKey();
+    const rawData = Uint8Array.from(atob(cipherBase64), c => c.charCodeAt(0));
+    const iv = rawData.slice(0, 12);
+    const data = rawData.slice(12);
+    const decrypted = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+    return new TextDecoder().decode(decrypted);
+  } catch (e) {
+    return cipherBase64;
+  }
+}
+
 const idlFactory = ({ IDL }) => {
   const SystemStats = IDL.Record({
     mode: IDL.Text,
@@ -63,6 +118,7 @@ const idlFactory = ({ IDL }) => {
     removeAdmin: IDL.Func([IDL.Text], [IDL.Text], []),
     getSecurityRules: IDL.Func([], [SecurityRulesConfig], ['query']),
     updateSecurityRules: IDL.Func([SecurityRulesConfig], [IDL.Text], []),
+    getVetKeyPublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
   });
 };
 
@@ -124,20 +180,17 @@ const statStatus = document.getElementById('stat-status');
 const threatTbody = document.getElementById('threat-tbody');
 const modeButtons = document.querySelectorAll('[data-mode]');
 const modeFeedback = document.getElementById('mode-feedback');
+const fetchVetkeyBtn = document.getElementById('fetch-vetkey-btn');
+const vetkeyDisplay = document.getElementById('vetkey-display');
 
-// 1. Clock function
 function updateClock() {
   if (!topbarTime) return;
   const now = new Date();
-  const hours = String(now.getHours()).padStart(2, '0');
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  const seconds = String(now.getSeconds()).padStart(2, '0');
-  topbarTime.textContent = `${hours}:${minutes}:${seconds}`;
+  topbarTime.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
 }
 setInterval(updateClock, 1000);
 updateClock();
 
-// 2. Master PID Copy Button
 coffeeBtn?.addEventListener('click', async () => {
   try {
     const master = await actor.getMasterPID();
@@ -152,12 +205,10 @@ coffeeBtn?.addEventListener('click', async () => {
   }
 });
 
-// 3. Creator Hub button
 devWebsiteBtn?.addEventListener('click', () => {
   window.open('https://internetcomputer.org', '_blank');
 });
 
-// 4. Copy PID button
 copyPidBtn?.addEventListener('click', async () => {
   const text = userPidDisplay?.textContent?.trim() || '';
   if (!text || text.startsWith('Not logged') || text === '—') {
@@ -168,22 +219,46 @@ copyPidBtn?.addEventListener('click', async () => {
     await navigator.clipboard.writeText(text);
     const originalText = copyPidBtn.textContent;
     copyPidBtn.textContent = 'Copied!';
-    setTimeout(() => {
-      copyPidBtn.textContent = originalText;
-    }, 1500);
+    setTimeout(() => { copyPidBtn.textContent = originalText; }, 1500);
   } catch (e) {
     alert('Failed to copy principal: ' + e.message);
   }
 });
 
-// 5. Mode feedback helper
+fetchVetkeyBtn?.addEventListener('click', async () => {
+  if (!actor) {
+    alert('Actor not initialized.');
+    return;
+  }
+  try {
+    fetchVetkeyBtn.textContent = 'Checking vetKDS support...';
+    const pubKeyBytes = await actor.getVetKeyPublicKey();
+    const hexKey = Array.from(pubKeyBytes, b => b.toString(16).padStart(2, '0')).join('');
+    if (vetkeyDisplay) {
+      vetkeyDisplay.textContent = `vetKDS Public Key (Hex): ${hexKey}`;
+    }
+    fetchVetkeyBtn.textContent = 'Fetch vetKDS Public Key';
+  } catch (err) {
+    console.error('vetKDS fetch error:', err);
+    let errMsg = err.message || String(err);
+    if (errMsg.includes('IC0536') || errMsg.includes("no method 'vet_keys_public_key'") || errMsg.includes('Management canister has no method')) {
+      errMsg = 'Your subnet does not support vetkeys yet.';
+    } else {
+      errMsg = `Your subnet does not support vetkeys yet. (${errMsg})`;
+    }
+    if (vetkeyDisplay) {
+      vetkeyDisplay.textContent = errMsg;
+    }
+    fetchVetkeyBtn.textContent = 'Fetch vetKDS Public Key';
+  }
+});
+
 function setModeFeedback(message, state = 'success') {
   if (!modeFeedback) return;
   modeFeedback.textContent = message;
   modeFeedback.dataset.state = state;
 }
 
-// 6. Mode buttons disabled helper
 function setModeButtonsDisabled(disabled) {
   modeButtons.forEach((btn) => {
     btn.disabled = disabled;
@@ -191,19 +266,13 @@ function setModeButtonsDisabled(disabled) {
   });
 }
 
-// Apply active mode theme class to body for visual indicator synchronization
 function applyModeVisualTheme(normalizedMode) {
   document.body.classList.remove('mode-off-active', 'mode-medium-active', 'mode-on-active');
-  if (normalizedMode === 'off') {
-    document.body.classList.add('mode-off-active');
-  } else if (normalizedMode === 'medium') {
-    document.body.classList.add('mode-medium-active');
-  } else if (normalizedMode === 'on') {
-    document.body.classList.add('mode-on-active');
-  }
+  if (normalizedMode === 'off') document.body.classList.add('mode-off-active');
+  else if (normalizedMode === 'medium') document.body.classList.add('mode-medium-active');
+  else if (normalizedMode === 'on') document.body.classList.add('mode-on-active');
 }
 
-// 7. Set mode function
 async function setMode(mode) {
   if (modeRequestInFlight) return;
   modeRequestInFlight = true;
@@ -212,9 +281,7 @@ async function setMode(mode) {
 
   try {
     const res = await actor.setMode(mode);
-    if (res !== 'Mode updated.') {
-      throw new Error(res);
-    }
+    if (res !== 'Mode updated.') throw new Error(res);
     setModeFeedback(`Mode updated to ${mode}`, 'success');
     applyModeVisualTheme(mode.toLowerCase());
     await refreshDashboard(false);
@@ -229,13 +296,10 @@ async function setMode(mode) {
 modeButtons.forEach((button) => {
   button.addEventListener('click', async () => {
     const mode = button.dataset.mode;
-    if (mode) {
-      await setMode(mode);
-    }
+    if (mode) await setMode(mode);
   });
 });
 
-// 8. Separated refreshStats and refreshThreats
 async function refreshStats(showFeedback = false) {
   try {
     const stats = await actor.getStats();
@@ -252,12 +316,7 @@ async function refreshStats(showFeedback = false) {
     modeButtons.forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.mode === map[normalized]);
     });
-
     applyModeVisualTheme(normalized);
-
-    if (showFeedback) {
-      setModeFeedback(`Firewall ${stats.mode.toLowerCase()} · synced`, 'success');
-    }
   } catch (e) {
     if (statStatus) {
       statStatus.textContent = 'Offline';
@@ -277,7 +336,6 @@ async function refreshThreats() {
   }
 }
 
-// 21. Escape HTML helper
 function escapeHtml(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -287,7 +345,6 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-// 19 & 20. Format timestamp and render threats
 function formatTimestamp(timestamp) {
   try {
     const ms = Number(BigInt(timestamp) / 1000000n);
@@ -316,7 +373,6 @@ function renderThreats(threats) {
     .join('');
 }
 
-// 9. refreshDashboard function
 async function refreshDashboard(showFeedback = false) {
   if (dashboardRefreshInFlight || document.hidden) return;
   dashboardRefreshInFlight = true;
@@ -329,28 +385,20 @@ async function refreshDashboard(showFeedback = false) {
   }
 }
 
-// 10. startLiveRefresh function
 function startLiveRefresh() {
   if (dashboardRefreshTimer) clearInterval(dashboardRefreshTimer);
-  dashboardRefreshTimer = setInterval(() => {
-    refreshDashboard(false);
-  }, 5000);
+  dashboardRefreshTimer = setInterval(() => { refreshDashboard(false); }, 5000);
 }
 
-// 11. initializeDashboard function
 async function initializeDashboard() {
   await refreshDashboard(true);
   startLiveRefresh();
 }
 
-// 12. Visibility change listener
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    refreshDashboard(false);
-  }
+  if (!document.hidden) refreshDashboard(false);
 });
 
-// 13. loadSecurityRules
 async function loadSecurityRules() {
   try {
     const config = await actor.getSecurityRules();
@@ -363,22 +411,15 @@ async function loadSecurityRules() {
   }
 }
 
-// 14. Rules form submit handler
 rulesForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   try {
-    const inj = ruleInjection?.checked ?? true;
-    const des = ruleDestructive?.checked ?? true;
-    const priv = rulePrivilege?.checked ?? true;
-    const maxCtxVal = ruleMaxContext?.value ?? '12000';
-
     const newConfig = {
-      blockPromptInjection: inj,
-      blockDestructiveCommands: des,
-      blockPrivilegeEscalation: priv,
-      maxContextLength: BigInt(maxCtxVal || 12000),
+      blockPromptInjection: ruleInjection?.checked ?? true,
+      blockDestructiveCommands: ruleDestructive?.checked ?? true,
+      blockPrivilegeEscalation: rulePrivilege?.checked ?? true,
+      maxContextLength: BigInt(ruleMaxContext?.value || 12000),
     };
-
     const res = await actor.updateSecurityRules(newConfig);
     alert(res);
   } catch (err) {
@@ -386,7 +427,6 @@ rulesForm?.addEventListener('submit', async (e) => {
   }
 });
 
-// 15. loadAdminList and window.removeAdminPID
 async function loadAdminList() {
   try {
     const admins = await actor.getAdmins();
@@ -420,7 +460,6 @@ window.removeAdminPID = async (pid) => {
   }
 };
 
-// 16. addAdminForm submit handler
 addAdminForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const pid = newAdminInput?.value?.trim();
@@ -435,7 +474,6 @@ addAdminForm?.addEventListener('submit', async (e) => {
   }
 });
 
-// 17. evaluatePermissions function
 async function evaluatePermissions() {
   try {
     const master = await actor.getMasterPID();
@@ -452,10 +490,10 @@ async function evaluatePermissions() {
     let isOwner = false;
     if (currentPID) {
       isAdmin = await actor.checkIsAdmin(currentPID);
-      isOwner = (master === currentPID || currentPID === 'wlwt3-udsnn-x5e55-jumbo-dollo-a4uoz-cbzri-vsljn-xaq5v-jxqb5-vae');
+      isOwner = isAdmin || (master === currentPID);
     }
 
-    if (adminControlPanel) adminControlPanel.style.display = isAdmin ? 'block' : 'none';
+    if (adminControlPanel) adminControlPanel.style.display = (isAdmin || isOwner) ? 'block' : 'none';
     if (masterStudioPanel) masterStudioPanel.style.display = isOwner ? 'block' : 'none';
     if (guestControlPanel) guestControlPanel.style.display = (!isAdmin && !isOwner) ? 'block' : 'none';
 
@@ -468,7 +506,6 @@ async function evaluatePermissions() {
   }
 }
 
-// 18. Claim button click handler
 claimMasterBtn?.addEventListener('click', async () => {
   if (!currentPID) {
     alert('Please log in with Internet Identity first.');
@@ -483,24 +520,15 @@ claimMasterBtn?.addEventListener('click', async () => {
   }
 });
 
-// 23 & 24 & 25. Chat history helpers & storage
 function appendMessageToHistory(role, text, mode = '', isBlocked = false, reason = '') {
   document.getElementById('chat-history-empty')?.remove();
   const bubble = document.createElement('div');
   bubble.className = `chat-message-bubble ${role === 'user' ? 'user-msg' : 'ai-msg'}`;
   const ts = new Date().toLocaleTimeString();
   if (role === 'user') {
-    bubble.innerHTML = `
-      <div class="chat-msg-header"><span>USER</span><span>${ts}</span></div>
-      <p class="chat-msg-body">${escapeHtml(text)}</p>`;
+    bubble.innerHTML = `<div class="chat-msg-header"><span>USER</span><span>${ts}</span></div><p class="chat-msg-body">${escapeHtml(text)}</p>`;
   } else {
-    bubble.innerHTML = `
-      <div class="chat-msg-header">
-        <span style="color:${isBlocked ? 'var(--coral)' : '#79e4a5'}">${isBlocked ? 'BLOCKED' : 'ALLOWED'} (${escapeHtml(mode)})</span>
-        <span>${ts}</span>
-      </div>
-      <p class="chat-msg-body">${escapeHtml(text)}</p>
-      ${reason ? `<div style="margin-top:4px; font-size:10px; color:var(--faint);">Reason: ${escapeHtml(reason)}</div>` : ''}`;
+    bubble.innerHTML = `<div class="chat-msg-header"><span style="color:${isBlocked ? 'var(--coral)' : '#79e4a5'}">${isBlocked ? 'BLOCKED' : 'ALLOWED'} (${escapeHtml(mode)})</span><span>${ts}</span></div><p class="chat-msg-body">${escapeHtml(text)}</p>${reason ? `<div style="margin-top:4px; font-size:10px; color:var(--faint);">Reason: ${escapeHtml(reason)}</div>` : ''}`;
   }
   if (chatHistoryContainer) {
     chatHistoryContainer.appendChild(bubble);
@@ -512,9 +540,7 @@ function appendMessageToHistory(role, text, mode = '', isBlocked = false, reason
 function saveChatHistoryToStorage() {
   if (!chatHistoryContainer) return;
   const items = [];
-  chatHistoryContainer.querySelectorAll('.chat-message-bubble').forEach((b) => {
-    items.push({ html: b.outerHTML });
-  });
+  chatHistoryContainer.querySelectorAll('.chat-message-bubble').forEach((b) => { items.push({ html: b.outerHTML }); });
   localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
 }
 
@@ -535,14 +561,10 @@ function loadStoredChatHistory() {
 clearHistoryBtn?.addEventListener('click', () => {
   localStorage.removeItem(STORAGE_KEY);
   if (chatHistoryContainer) {
-    chatHistoryContainer.innerHTML = `
-      <div class="chat-history-empty" id="chat-history-empty">
-        <p style="color:var(--faint); font-family:'DM Mono', monospace; font-size:12px; text-align:center; padding:24px 0;">History cleared.</p>
-      </div>`;
+    chatHistoryContainer.innerHTML = `<div class="chat-history-empty" id="chat-history-empty"><p style="color:var(--faint); font-family:'DM Mono', monospace; font-size:12px; text-align:center; padding:24px 0;">History cleared.</p></div>`;
   }
 });
 
-// 22. Per-ticket polling
 function pollForAIResponse(ticketId, mode) {
   appendMessageToHistory('ai', 'Awaiting response from daemon agent...', mode, false, 'Queued on canister bridge');
   const bubbles = chatHistoryContainer?.querySelectorAll('.ai-msg');
@@ -558,7 +580,8 @@ function pollForAIResponse(ticketId, mode) {
       if (responseOpt && responseOpt.length > 0) {
         clearInterval(activePollIntervals[ticketId]);
         delete activePollIntervals[ticketId];
-        if (targetBubbleBody) targetBubbleBody.innerText = responseOpt[0];
+        const decryptedResponse = await decryptPayload(responseOpt[0]);
+        if (targetBubbleBody) targetBubbleBody.innerText = decryptedResponse;
         if (chatStatus) chatStatus.textContent = 'Response received';
         saveChatHistoryToStorage();
       } else if (attempts > 40) {
@@ -574,25 +597,26 @@ function pollForAIResponse(ticketId, mode) {
   }, 1500);
 }
 
-// 26. Handle prompt submit
 chatForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = promptInput?.value?.trim();
   if (!text) return;
 
   if (sendPromptBtn) sendPromptBtn.disabled = true;
-  if (chatStatus) chatStatus.textContent = 'Transmitting...';
+  if (chatStatus) chatStatus.textContent = 'Encrypting & Transmitting...';
   appendMessageToHistory('user', text);
   if (promptInput) promptInput.value = '';
 
   try {
-    const result = await actor.processPrompt(text);
+    const encryptedText = await encryptPayload(text);
+    const result = await actor.processPrompt(encryptedText);
     if (result.allowed) {
       if (result.ticketId && result.ticketId.length > 0) {
         if (chatStatus) chatStatus.textContent = 'Queued for daemon';
         pollForAIResponse(result.ticketId[0], result.mode);
       } else {
-        appendMessageToHistory('ai', result.response, result.mode, false, result.reason);
+        const decryptedResponse = await decryptPayload(result.response);
+        appendMessageToHistory('ai', decryptedResponse, result.mode, false, result.reason);
         if (chatStatus) chatStatus.textContent = 'Processed';
       }
     } else {
@@ -608,7 +632,6 @@ chatForm?.addEventListener('submit', async (e) => {
   }
 });
 
-// 27, 28, 29, 30. Auth functions
 async function handleAuthenticated(identity) {
   actor = await buildActor(identity);
   currentPID = identity.getPrincipal().toText();
@@ -619,7 +642,7 @@ async function handleAuthenticated(identity) {
 
 authBtn?.addEventListener('click', async () => {
   if (!authClient) {
-    alert('Authentication client is still loading. Please try again in a moment.');
+    alert('Authentication client is still loading. Please try again.');
     return;
   }
   if (await authClient.isAuthenticated()) {

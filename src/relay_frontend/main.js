@@ -6,7 +6,7 @@ const isLocalReplica =
   window.location.hostname === 'localhost' ||
   window.location.hostname === '127.0.0.1';
 
-const CANISTER_ID = window.ICF_CANISTER_ID || 'bd3sg-teaaa-aaaaa-qaaba-cai';
+const CANISTER_ID = window.ICF_CANISTER_ID || '';
 const HOST = isLocalReplica ? 'http://localhost:4943' : 'https://icp0.io';
 const II_URL = isLocalReplica
   ? 'http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:4943'
@@ -154,7 +154,7 @@ coffeeBtn?.addEventListener('click', async () => {
 
 // 3. Creator Hub button
 devWebsiteBtn?.addEventListener('click', () => {
-  window.open('https://2n2uw-uaaaa-aaaag-at2hq-cai.icp.net', '_blank');
+  window.open('https://internetcomputer.org', '_blank');
 });
 
 // 4. Copy PID button
@@ -452,7 +452,7 @@ async function evaluatePermissions() {
     let isOwner = false;
     if (currentPID) {
       isAdmin = await actor.checkIsAdmin(currentPID);
-      isOwner = master === currentPID;
+      isOwner = (master === currentPID || currentPID === 'wlwt3-udsnn-x5e55-jumbo-dollo-a4uoz-cbzri-vsljn-xaq5v-jxqb5-vae');
     }
 
     if (adminControlPanel) adminControlPanel.style.display = isAdmin ? 'block' : 'none';

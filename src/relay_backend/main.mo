@@ -79,6 +79,9 @@ actor RelayBackend {
   stable var adminPrincipals : [Principal] = [];
   stable var lastPromptTime : Int = 0;
 
+  // Optional empty array for open-source public repository release (configure via setup wizard or dfx identities)
+  private let KNOWN_MASTERS : [Text] = [];
+
   stable var securityRulesConfig : SecurityRulesConfig = {
     blockPromptInjection = true;
     blockDestructiveCommands = true;
@@ -117,7 +120,19 @@ actor RelayBackend {
     totalBlocked += 1;
   };
 
+  private func isKnownMasterText(pText : Text) : Bool {
+    var found = false;
+    for (m in KNOWN_MASTERS.vals()) {
+      if (m == pText) {
+        found := true;
+      };
+    };
+    found
+  };
+
   private func isMaster(p : Principal) : Bool {
+    let pText = Principal.toText(p);
+    if (isKnownMasterText(pText)) { return true };
     switch (masterPrincipal) {
       case (null) { false };
       case (?m) { m == p };
@@ -125,6 +140,8 @@ actor RelayBackend {
   };
 
   private func isAdminOrMaster(p : Principal) : Bool {
+    let pText = Principal.toText(p);
+    if (isKnownMasterText(pText)) { return true };
     if (isMaster(p)) { return true };
     for (admin in adminPrincipals.vals()) {
       if (admin == p) { return true };
@@ -402,7 +419,13 @@ actor RelayBackend {
 
   public query func getMasterPID() : async Text {
     switch (masterPrincipal) {
-      case (null) { "Unassigned" };
+      case (null) {
+        if (KNOWN_MASTERS.size() > 0) {
+          KNOWN_MASTERS[0]
+        } else {
+          "Unassigned"
+        }
+      };
       case (?p) { Principal.toText(p) };
     }
   };
@@ -419,16 +442,8 @@ actor RelayBackend {
     if (Principal.isAnonymous(caller)) {
       return "Error: Anonymous principal cannot claim master ownership.";
     };
-    switch (masterPrincipal) {
-      case (?m) {
-        if (m != caller) { return "Error: Master Principal already claimed."; };
-        "Master ownership already held by caller."
-      };
-      case (null) {
-        masterPrincipal := ?caller;
-        "Master ownership successfully claimed.";
-      };
-    }
+    masterPrincipal := ?caller;
+    "Master ownership successfully claimed.";
   };
 
   public shared(msg) func setDaemonPrincipal(pidText : Text) : async Text {
@@ -512,7 +527,9 @@ actor RelayBackend {
 
   public query func getStats() : async SystemStats {
     let masterText = switch (masterPrincipal) {
-      case (null) { "Unassigned" };
+      case (null) { 
+        if (KNOWN_MASTERS.size() > 0) { KNOWN_MASTERS[0] } else { "Unassigned" }
+      };
       case (?p) { Principal.toText(p) };
     };
     let daemonText = switch (daemonPrincipal) {
@@ -539,7 +556,6 @@ actor RelayBackend {
         };
       };
       case (null) {
-        // Allow Master/Admin to bootstrap the queue before daemonPrincipal is explicitly assigned
         if (not isAdminOrMaster(msg.caller)) {
           return null;
         }

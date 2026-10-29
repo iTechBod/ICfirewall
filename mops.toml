@@ -1,0 +1,10 @@
+[package]
+name = "relay_backend"
+version = "7.0.0"
+dependencies = [ "base" ]
+
+[toolchain]
+moc = "0.11.1"
+
+[dependencies]
+base = "0.11.0"

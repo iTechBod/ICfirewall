@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ICfirewall Command Center</title>
+    <title>ICfirewall Command Center (v7.0 E2EE & vetKDS)</title>
     <meta name="theme-color" content="#08090c">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -14,7 +14,7 @@
         <header class="topbar">
             <a class="brand" href="/" aria-label="ICfirewall Command Center">
                 <span class="brand-mark"><span></span></span>
-                <span><strong>ICfirewall</strong><small>COMMAND CENTER</small></span>
+                <span><strong>ICfirewall</strong><small>v7.0 E2EE & vetKDS CENTER</small></span>
             </a>
             <div class="topbar-meta">
                 <div id="auth-container" class="auth-wrapper">
@@ -29,7 +29,7 @@
                 </button>
                 <button class="network-pill interactive-btn" id="coffee-btn" type="button">
                     <span class="pulse-dot"></span>
-                    <span>Master PID Copy</span>
+                    <span>Buy dev a Coffee☕️</span>
                 </button>
                 <span class="topbar-time" id="topbar-time">--:--:--</span>
             </div>
@@ -37,9 +37,9 @@
 
         <section class="hero-row">
             <div class="hero-copy">
-                <p class="eyebrow"><span class="eyebrow-line"></span> ZERO-TRUST RELAY</p>
+                <p class="eyebrow"><span class="eyebrow-line"></span> END-TO-END ENCRYPTION & VETKDS</p>
                 <h1>Keep every prompt<br><em>inside the line.</em></h1>
-                <p class="hero-description">A privacy-first decentralized perimeter for local AI intelligence. Watch traffic, tune the firewall boundary, and protect context.</p>
+                <p class="hero-description">A privacy-first decentralized perimeter for local AI intelligence with AES-GCM session encryption, cryptographic guardrails, and threshold vetKDS keys.</p>
             </div>
         </section>
 
@@ -115,7 +115,7 @@
                     <h3>Manage Administrators</h3>
                     <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Add or revoke secondary admin principals.</p>
                     <form id="add-admin-form" style="display:flex; gap:8px; margin-bottom:12px;">
-                        <input type="text" id="new-admin-input" placeholder="Principal ID (e.g. xxxxx-...)" class="studio-input" required>
+                        <input type="text" id="new-admin-input" placeholder="Principal ID..." class="studio-input" required>
                         <button type="submit" class="network-pill send-btn" style="padding: 0 16px;">Add</button>
                     </form>
                     <div id="admin-list-container" class="admin-list">
@@ -138,6 +138,17 @@
                     </form>
                 </div>
             </div>
+
+            <!-- E2EE Session Key & vetKDS Vault Studio Integration -->
+            <div class="studio-card" style="margin-top: 16px;">
+                <h3>🔐 AES-GCM & vetKDS Cryptographic Vault</h3>
+                <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Active session encryption keys ensure prompts are encrypted client-side. System vetKDS threshold keys provide decentralized master derivation.</p>
+                <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                    <span id="e2ee-status" style="font-family:'DM Mono',monospace; font-size:11px; color:var(--emerald);">AES-GCM: Active (256-bit)</span>
+                    <button id="fetch-vetkey-btn" class="network-pill interactive-btn" style="padding: 6px 12px; font-size: 11px;" type="button">Fetch vetKDS Public Key</button>
+                </div>
+                <div id="vetkey-display" style="margin-top: 8px; font-family:'DM Mono',monospace; font-size:10px; color:var(--faint); word-break: break-all;"></div>
+            </div>
         </section>
 
         <!-- Dynamic User Principal ID Clipboard Widget -->
@@ -149,7 +160,6 @@
                 </div>
                 <span class="lock-glyph" aria-hidden="true">🆔</span>
             </div>
-            <p style="color:var(--faint); font-size:12px; margin-bottom: 12px;">Your active cryptographic principal identifier on the Internet Computer network.</p>
             <div class="glass-card pid-container" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px;">
                 <div style="font-family: monospace; font-size: 13px; color: #a1a1aa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;" id="userPidDisplay">
                     Not logged in (Click II Passkey Login above)
@@ -169,11 +179,10 @@
                 </div>
                 <div style="display:flex; align-items:center; gap:12px;">
                     <button id="clear-history-btn" class="network-pill interactive-btn" style="padding: 4px 10px; font-size: 9px;" type="button">Clear History</button>
-                    <span class="live-label"><span class="pulse-dot"></span> WEBBOUND</span>
+                    <span class="live-label"><span class="pulse-dot"></span> E2EE SECURE</span>
                 </div>
             </div>
 
-            <!-- Scrollable Conversation Feed -->
             <div id="chat-history-container" class="chat-history-stream">
                 <div class="chat-history-empty" id="chat-history-empty">
                     <p style="color:var(--faint); font-family:'DM Mono', monospace; font-size:12px; text-align:center; padding:24px 0;">No active prompts in session memory. Enter a prompt below to begin evaluation stream.</p>
@@ -187,7 +196,7 @@
                 <div class="chat-actions">
                     <span id="chat-status" class="chat-status">Ready</span>
                     <button id="send-prompt-btn" type="submit" class="network-pill send-btn">
-                        <span>Send Prompt</span>
+                        <span>Send Secure Prompt</span>
                         <span class="mode-arrow">&#8594;</span>
                     </button>
                 </div>
@@ -255,16 +264,12 @@
         navigator.clipboard.writeText(pidText).then(() => {
             const btn = document.getElementById("copyPidBtn");
             btn.innerText = "Copied! ✨";
-            btn.style.background = "linear-gradient(135deg, #10b981, #059669)";
-            setTimeout(() => {
-                btn.innerText = "Copy PID";
-                btn.style.background = "linear-gradient(135deg, #3b82f6, #2563eb)";
-            }, 2000);
+            setTimeout(() => { btn.innerText = "Copy PID"; }, 2000);
         }).catch(err => {
             console.error("Failed to copy PID: ", err);
         });
     }
     </script>
-    <script type="module" src="main.js?v=33"></script>
+    <script type="module" src="main.js?v=37"></script>
 </body>
 </html>

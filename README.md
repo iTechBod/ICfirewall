@@ -109,7 +109,7 @@ ICfirewall uses a two-step claim process to prevent identity hijacking upon cani
    Log in to the Web UI using Internet Identity and click "Claim Master PID Now" in the initialization panel.
  * Authorize Daemon Principal:
    In the Master Admin Studio panel on the Web UI (or via DFX), authorize your daemon's principal:
-   ```text
+```text
    dfx canister call relay_backend setDaemonPrincipal '("DAEMON_PRINCIPAL_ID")'
 ```
 

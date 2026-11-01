@@ -6,9 +6,9 @@
       "packtool": "mops sources"
     },
     "relay_frontend": {
-      "dependencies": ["relay_backend"],
-      "source": ["src/relay_frontend"],
-      "type": "assets"
+      "source": ["dist"],
+      "type": "assets",
+      "build": ["npm run build"]
     }
   },
   "defaults": {

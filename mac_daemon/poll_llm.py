@@ -1,402 +1,438 @@
 #!/usr/bin/env python3
 """
-ICfirewall Agentic Daemon (Public Release v7.0 E2EE & Setup Wizard)
+ICfirewall daemon v8.44 (Native Odysseus Session Field Fix & IBE Support)
 """
-
+import base64
+import getpass
 import json
 import os
 import re
-import shutil
-import subprocess
-import time
-import getpass
-import tempfile
 import signal
-import base64
-import requests
+import subprocess
+import sys
+import time
+import unicodedata
 from pathlib import Path
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-# --- Path Configurations ---
+import requests
+
 DAEMON_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = DAEMON_DIR.parent
-CANISTER_IDS_PATH = PROJECT_ROOT / "canister_ids.json"
+HELPER = DAEMON_DIR / "vetkeys_helper" / "crypto_helper.mjs"
 ODYSSEUS_CONFIG_PATH = PROJECT_ROOT / "odysseus_config.json"
+CANISTER_IDS_PATH = PROJECT_ROOT / "canister_ids.json"
 
-DEFAULT_IC_CANISTER_ID = os.getenv("ICF_CANISTER_ID", "")
-CANISTER_ID_REGEX = re.compile(r"\b[a-z0-9]{5}(?:-[a-z0-9]{5}){4}\b", re.IGNORECASE)
-MAX_PAYLOAD_SIZE_BYTES = 64 * 1024
-
-DFX_BIN = os.getenv(
-    "DFX_BIN",
-    shutil.which("dfx") or os.path.expanduser("~/.cache/dfinity/versions/0.24.3/dfx")
-)
-ODYSSEUS_LOG_PATH = os.path.expanduser(
-    os.getenv("ODYSSEUS_LOG_PATH", "~/Desktop/Odysseus_Remote_Log.md")
-)
-
-BACKEND_CANISTER_ID = DEFAULT_IC_CANISTER_ID
+CANISTER_ID = os.getenv("ICF_CANISTER_ID", "v7c4r-xqaaa-aaaam-ad2ga-cai")
+DFX_BIN = os.getenv("DFX_BIN", "dfx")
 DFX_NETWORK = os.getenv("DFX_NETWORK", "ic")
-ACTIVE_IDENTITY = os.getenv("ICF_IDENTITY", "default")
+IDENTITY = os.getenv("ICF_IDENTITY", "icf-daemon")
+NODE_BIN = os.getenv("NODE_BIN", "node")
+DAEMON_SCAN = os.getenv("ICF_DAEMON_SCAN", "1") != "0"
+MAX_REPLY_CHARS = 30000
 
 should_exit = False
 
-def handle_exit_signal(sig, frame):
+
+def _on_signal(sig, frame):
     global should_exit
     print("\n🛑 Graceful shutdown requested...")
     should_exit = True
 
-signal.signal(signal.SIGINT, handle_exit_signal)
-signal.signal(signal.SIGTERM, handle_exit_signal)
+
+signal.signal(signal.SIGINT, _on_signal)
+signal.signal(signal.SIGTERM, _on_signal)
+
+# ----------------------------------------------------------------------------- candid text helpers
+def idl_hash(name: str) -> int:
+    h = 0
+    for b in name.encode():
+        h = (h * 223 + b) & 0xFFFFFFFF
+    return h
 
 
-def run_cmd(cmd: list[str]) -> str:
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise RuntimeError(f"Command failed ({' '.join(cmd)}): {res.stderr.strip()}")
-    return res.stdout.strip()
+_KNOWN_FIELDS = ["ticketId", "taskType", "leaseToken", "attemptCount", "Inspected", "Private"]
+_HASH_TO_NAME = {idl_hash(n): n for n in _KNOWN_FIELDS}
 
 
-def extract_canister_id(raw_input: str) -> str | None:
-    match = CANISTER_ID_REGEX.search(raw_input)
-    return match.group(0) if match else None
+def _field_name(raw: str) -> str:
+    digits = raw.replace("_", "")
+    if digits.isdigit():
+        return _HASH_TO_NAME.get(int(digits), raw)
+    return raw
 
 
-def decrypt_payload(cipher_base64: str) -> str:
-    raw_key = os.getenv("ICF_E2EE_RAW_KEY")
-    if not raw_key:
-        return cipher_base64
-    try:
-        key_bytes = bytes([int(x) for x in raw_key.split(",")])
-        raw_data = base64.b64decode(cipher_base64)
-        iv = raw_data[:12]
-        ciphertext = raw_data[12:]
-        aesgcm = AESGCM(key_bytes)
-        decrypted = aesgcm.decrypt(iv, ciphertext, None)
-        return decrypted.decode("utf-8")
-    except Exception:
-        return cipher_base64
+def _read_literal(s: str, i: int):
+    assert s[i] == '"'
+    i += 1
+    out = bytearray()
+    while i < len(s):
+        c = s[i]
+        if c == '"':
+            return bytes(out), i + 1
+        if c == "\\":
+            i += 1
+            n = s[i]
+            if n in '"\\\'':
+                out += n.encode()
+                i += 1
+            elif n == "n":
+                out += b"\n"; i += 1
+            elif n == "r":
+                out += b"\r"; i += 1
+            elif n == "t":
+                out += b"\t"; i += 1
+            elif n == "u" and s[i + 1] == "{":
+                j = s.index("}", i)
+                out += chr(int(s[i + 2:j].replace("_", ""), 16)).encode("utf-8")
+                i = j + 1
+            else:
+                out.append(int(s[i:i + 2], 16))
+                i += 2
+        else:
+            out += c.encode("utf-8")
+            i += 1
+    raise ValueError("unterminated candid literal")
 
 
-def encrypt_payload(text: str) -> str:
-    raw_key = os.getenv("ICF_E2EE_RAW_KEY")
-    if not raw_key:
-        return text
-    try:
-        key_bytes = bytes([int(x) for x in raw_key.split(",")])
-        iv = os.urandom(12)
-        aesgcm = AESGCM(key_bytes)
-        ciphertext = aesgcm.encrypt(iv, text.encode("utf-8"), None)
-        return base64.b64encode(iv + ciphertext).decode("utf-8")
-    except Exception:
-        return text
+def _split_literals(text: str):
+    skeleton, literals, i = [], [], 0
+    while i < len(text):
+        if text[i] == '"':
+            data, i = _read_literal(text, i)
+            literals.append(data)
+            skeleton.append('""')
+        else:
+            skeleton.append(text[i])
+            i += 1
+    return "".join(skeleton), literals
 
 
-def parse_candid_pending_task(raw_output: str) -> dict | None:
-    if not raw_output or raw_output in ("null", "()", "[]", '""'):
+def parse_blob_reply(out: str) -> bytes:
+    m = re.search(r'blob\s+"', out)
+    if not m:
+        raise ValueError(f"no blob in reply: {out[:120]!r}")
+    data, _ = _read_literal(out, m.end() - 1)
+    return data
+
+
+def blob_literal(data: bytes) -> str:
+    return 'blob "' + "".join(f"\\{b:02x}" for b in data) + '"'
+
+
+def text_literal(s: str) -> str:
+    esc = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return f'"{esc}"'
+
+
+def parse_pending_task(out: str):
+    out = out.strip()
+    if not re.match(r"\(\s*opt\b", out):
         return None
+    skeleton, literals = _split_literals(out)
+    nums = {}
+    for m in re.finditer(r"([\w]+)\s*=\s*([\d_]+)\s*:\s*nat\b", skeleton):
+        nums[_field_name(m.group(1))] = int(m.group(2).replace("_", ""))
+    tag = re.search(r"([\w]+)\s*=\s*(blob\s+)?\"\"", skeleton)
+    if "ticketId" not in nums or "leaseToken" not in nums or not tag or not literals:
+        raise ValueError(f"unrecognised PendingTask reply: {skeleton[:200]!r}")
+    kind = _field_name(tag.group(1))
+    task = {"ticket": nums["ticketId"], "lease": nums["leaseToken"], "attempt": nums.get("attemptCount", 1)}
+    if kind == "Private" or tag.group(2):
+        task.update(kind="Private", blob=literals[0])
+    else:
+        task.update(kind="Inspected", text=literals[0].decode("utf-8", "replace"))
+    return task
 
-    if len(raw_output.encode("utf-8", errors="ignore")) > MAX_PAYLOAD_SIZE_BYTES:
-        print("⚠️ Warning: Received canister payload exceeds safety size limits.")
-        return None
 
-    try:
-        data = json.loads(raw_output)
-        
-        def parse_nat(val):
-            if isinstance(val, (int, float)):
-                return int(val)
-            if isinstance(val, str) and val.isdigit():
-                return int(val)
-            if isinstance(val, dict):
-                for k, v in val.items():
-                    if "nat" in k.lower() or k == "__nat__":
-                        return int(v)
-            return None
+# ----------------------------------------------------------------------------- scanner
+_FORMAT_CATS = {"Cf", "Cc", "Co", "Cn"}
+_INJECTION = ["ignore previous instructions", "ignore all previous", "ignore the above", "ignore prior instructions",
+              "disregard previous", "disregard all prior", "disregard your instructions", "forget your instructions",
+              "forget all previous", "reveal your system prompt", "print your system prompt", "developer mode",
+              "jailbreak", "do anything now", "you are now", "pretend to be", "system override"]
+_DESTRUCTIVE = ["rm -rf", "rm -fr", "rm -r -f", "drop database", "drop table", "truncate table", "mkfs", "dd if=",
+                "format c:", "> /dev/sda", ":(){", "shred -", "del /f /s"]
+_PRIVILEGE = ["chmod 777", "chmod -r 777", "su root", "su -", "chown root", "setuid", "visudo", "/etc/sudoers"]
+_WORDS = {"sudo", "doas", "mkfs"}
 
-        items = data if isinstance(data, list) else [data]
 
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            
-            task_node = item
-            if "Some" in item and isinstance(item["Some"], dict):
-                task_node = item["Some"]
-            elif "opt" in item and isinstance(item["opt"], dict):
-                task_node = item["opt"]
+def normalize(text: str) -> str:
+    t = unicodedata.normalize("NFKC", text).lower()
+    t = "".join(" " if ch.isspace() else ch for ch in t if unicodedata.category(ch) not in _FORMAT_CATS or ch.isspace())
+    return re.sub(r"\s+", " ", t).strip()
 
-            t_id = None
-            p_text = None
 
-            for k, v in task_node.items():
-                k_lower = k.lower()
-                if "ticket" in k_lower:
-                    t_id = parse_nat(v)
-                elif "prompt" in k_lower or "text" in k_lower:
-                    p_text = str(v)
-
-            if t_id is not None and p_text is not None:
-                return {"ticketId": t_id, "prompt": decrypt_payload(p_text)}
-    except json.JSONDecodeError:
-        pass
-
-    ticket_match = re.search(r'ticketId\s*=\s*([0-9]+)', raw_output)
-    prompt_match = re.search(r'prompt\s*=\s*"([^"]*(?:\\.[^"]*)*)"', raw_output, re.DOTALL)
-    
-    if ticket_match and prompt_match:
-        try:
-            raw_p = prompt_match.group(1).encode().decode('unicode-escape')
-            return {
-                "ticketId": int(ticket_match.group(1)),
-                "prompt": decrypt_payload(raw_p)
-            }
-        except Exception:
-            pass
-
+def _scan_one(norm: str):
+    for group, pats in (("prompt injection", _INJECTION), ("destructive command", _DESTRUCTIVE), ("privilege escalation", _PRIVILEGE)):
+        for p in pats:
+            if p in norm:
+                return group
+    if _WORDS & set(re.findall(r"[a-z0-9]+", norm)):
+        return "privilege escalation"
     return None
 
 
+def scan(text: str):
+    norm = normalize(text)
+    hit = _scan_one(norm)
+    if hit:
+        return hit
+    for m in re.finditer(r"[A-Za-z0-9+/]{24,}={0,2}", text):
+        try:
+            hit = _scan_one(normalize(base64.b64decode(m.group(0) + "===", validate=False).decode("utf-8", "ignore")))
+        except Exception:
+            continue
+        if hit:
+            return f"{hit} (base64-encoded)"
+    for m in re.finditer(r"(?:[0-9a-fA-F]{2}){12,}", text):
+        try:
+            hit = _scan_one(normalize(bytes.fromhex(m.group(0)).decode("utf-8", "ignore")))
+        except Exception:
+            continue
+        if hit:
+            return f"{hit} (hex-encoded)"
+    return None
+
+
+# ----------------------------------------------------------------------------- canister + plumbing
+def run(cmd, timeout=60, stdin=None):
+    res = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_ROOT))
+    if res.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} failed: {res.stderr.strip()[:400]}")
+    return res.stdout.strip()
+
+
+def call_canister(method: str, arg: str | None = None, timeout: int = 90) -> str:
+    cmd = [DFX_BIN, "canister", "call", "--network", DFX_NETWORK, "--identity", IDENTITY,
+           "--output", "idl", "--quiet", CANISTER_ID, method]
+    if arg is not None:
+        cmd.append(arg)
+    return run(cmd, timeout=timeout)
+
+
+def helper(payload: dict) -> dict:
+    out = run([NODE_BIN, str(HELPER)], timeout=60, stdin=json.dumps(payload))
+    return json.loads(out)
+
+
+_public_key: bytes | None = None
+
+
+def get_public_key() -> bytes:
+    global _public_key
+    if _public_key is None:
+        _public_key = parse_blob_reply(call_canister("getVetKeyPublicKey"))
+    return _public_key
+
+
+def decrypt_private_prompt(task: dict) -> str:
+    seed = os.urandom(32)
+    tpk = bytes.fromhex(helper({"cmd": "tpk", "seed": seed.hex()})["tpk"])
+    enc_key = parse_blob_reply(call_canister(
+        "deriveDaemonKey", f"({task['ticket']} : nat, {task['lease']} : nat, {blob_literal(tpk)})"))
+    res = helper({"cmd": "decrypt", "seed": seed.hex(), "ticket": str(task["ticket"]),
+                  "publicKey": get_public_key().hex(), "encryptedKey": enc_key.hex(),
+                  "ciphertext": task["blob"].hex()})
+    return res["plaintext"]
+
+
+def seal_result(ticket: int, text: str) -> str:
+    return helper({"cmd": "encrypt", "publicKey": get_public_key().hex(), "ticket": str(ticket), "plaintext": text})["ciphertext"]
+
+
+# ----------------------------------------------------------------------------- Setup Wizard
+def setup_wizard() -> dict:
+    print("==================================================")
+    print("         🛡️ ICfirewall Setup Wizard              ")
+    print("==================================================")
+
+    saved_config = {}
+    if ODYSSEUS_CONFIG_PATH.exists():
+        try:
+            saved_config = json.loads(ODYSSEUS_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    default_url = "http://127.0.0.1:7860"
+    saved_url = saved_config.get("url", default_url)
+    if not saved_url or "/" in saved_url and not saved_url.startswith("http"):
+        saved_url = default_url
+    odysseus_url = input(f"Odysseus URL [{saved_url}]: ").strip() or saved_url
+
+    saved_user = saved_config.get("username", "ai")
+    if not saved_user or "/" in saved_user:
+        saved_user = "ai"
+    odysseus_user = input(f"Odysseus Username [{saved_user}]: ").strip() or saved_user
+
+    raw_saved_pass = saved_config.get("password", "bruh1234")
+    if not raw_saved_pass or "/" in raw_saved_pass or raw_saved_pass in ("****", "===="):
+        raw_saved_pass = "bruh1234"
+
+    entered_pass = getpass.getpass(f"Odysseus Password [saved]: ").strip()
+    odysseus_pass = entered_pass if entered_pass else raw_saved_pass
+
+    saved_session = saved_config.get("session_id", "0f51d438-50d7-4847-b74a-c64ca7c722cf")
+    if not saved_session or "/" in saved_session:
+        saved_session = "0f51d438-50d7-4847-b74a-c64ca7c722cf"
+    odysseus_session = input(f"Odysseus Session ID / Chat ID [{saved_session}]: ").strip() or saved_session
+
+    config = {
+        "url": odysseus_url.rstrip("/"),
+        "username": odysseus_user,
+        "password": odysseus_pass,
+        "session_id": odysseus_session
+    }
+
+    try:
+        ODYSSEUS_CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        print("✅ Saved configuration to odysseus_config.json")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not save config file: {e}")
+
+    return config
+
+
+# ----------------------------------------------------------------------------- LLM Client
 def clean_model_output(raw_text: str) -> str:
     if not raw_text:
         return ""
     cleaned = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
-    
-    lines = cleaned.split('\n')
-    filtered_lines = []
-    is_answering = False
-    
-    preamble_triggers = (
-        "analyze the user input", "analyze the preceding context", "determine intent", 
-        "safety check", "formulate a response", "self-correction", "final output generation"
-    )
-    
-    for line in lines:
-        stripped_lower = line.lower().strip()
-        is_preamble = any(stripped_lower.startswith(trig) for trig in preamble_triggers)
-        
-        if is_preamble:
-            is_answering = False
-            continue
-            
-        if not is_preamble and stripped_lower:
-            if stripped_lower.startswith("i'm sorry") or stripped_lower.startswith("here is") or not is_answering:
-                is_answering = True
-                
-        if is_answering:
-            filtered_lines.append(line)
-            
-    result = '\n'.join(filtered_lines).strip()
-    return result if result else cleaned.strip()
-
-
-def escape_candid_text(text: str) -> str:
-    escaped = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
-    return f'"{escaped}"'
-
-
-def call_canister(method: str, argument: str | None = None, timeout: int = 45) -> str:
-    command = [
-        DFX_BIN, "canister", "call", "--network", DFX_NETWORK,
-        "--identity", ACTIVE_IDENTITY, "--output", "json", "--quiet",
-    ]
-
-    tf_path = None
-    if argument is not None:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as tf:
-            tf.write(argument)
-            tf_path = tf.name
-        command.extend(["--argument-file", tf_path, BACKEND_CANISTER_ID, method])
-    else:
-        command.extend([BACKEND_CANISTER_ID, method])
-
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
-        return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Canister call '{method}' timed out after {timeout}s.")
-    finally:
-        if tf_path and os.path.exists(tf_path):
-            try:
-                os.unlink(tf_path)
-            except Exception:
-                pass
-
-
-def setup_wizard() -> tuple[str, str, str, dict]:
-    global BACKEND_CANISTER_ID, DFX_NETWORK, ACTIVE_IDENTITY
-    print("==================================================")
-    print("         🛡️ ICfirewall Setup Wizard              ")
-    print("==================================================")
-
-    data = {}
-    if CANISTER_IDS_PATH.exists():
-        try:
-            with open(CANISTER_IDS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            pass
-
-    if "relay_backend" not in data:
-        data["relay_backend"] = {}
-
-    current_backend_id = data["relay_backend"].get("ic", DEFAULT_IC_CANISTER_ID)
-    backend_input = input(f"Backend Canister ID [{current_backend_id}]: ").strip()
-    parsed_backend_id = extract_canister_id(backend_input)
-    BACKEND_CANISTER_ID = parsed_backend_id if parsed_backend_id else (backend_input if backend_input else current_backend_id)
-    data["relay_backend"]["ic"] = BACKEND_CANISTER_ID
-
-    try:
-        with open(CANISTER_IDS_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
-
-    if os.path.exists(DFX_BIN):
-        try:
-            ACTIVE_IDENTITY = os.getenv("ICF_IDENTITY", run_cmd([DFX_BIN, "identity", "whoami"]))
-            daemon_principal = run_cmd([DFX_BIN, "identity", "get-principal", "--identity", ACTIVE_IDENTITY])
-            call_canister("setDaemonPrincipal", f'("{daemon_principal}")')
-        except Exception:
-            pass
-
-    saved_config = {}
-    if ODYSSEUS_CONFIG_PATH.exists():
-        try:
-            with open(ODYSSEUS_CONFIG_PATH, "r", encoding="utf-8") as f:
-                saved_config = json.load(f)
-        except Exception:
-            pass
-
-    env_url = saved_config.get("url", os.getenv("ODYSSEUS_URL", "http://127.0.0.1:7860"))
-    odysseus_url = input(f"Odysseus URL [{env_url}]: ").strip() or env_url
-
-    env_user = saved_config.get("username", os.getenv("ODYSSEUS_USERNAME", ""))
-    odysseus_user = input(f"Odysseus Username [{env_user}]: ").strip() or env_user
-
-    env_pass = saved_config.get("password", os.getenv("ODYSSEUS_PASSWORD", ""))
-    odysseus_pass = getpass.getpass("Odysseus Password [****]: ").strip() or env_pass
-
-    env_session = saved_config.get("session_id", os.getenv("ODYSSEUS_SESSION_ID", ""))
-    odysseus_session = input(f"Odysseus Session ID [{env_session}]: ").strip() or env_session
-
-    odysseus_config = {
-        "url": odysseus_url.rstrip("/"),
-        "username": odysseus_user,
-        "password": odysseus_pass,
-        "session_id": odysseus_session,
-    }
-
-    try:
-        with open(ODYSSEUS_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(odysseus_config, f, indent=2)
-    except Exception:
-        pass
-
-    return BACKEND_CANISTER_ID, DFX_NETWORK, ACTIVE_IDENTITY, odysseus_config
+    return cleaned.strip()
 
 
 class OdysseusClient:
+    """
+    Native Odysseus client with required session field in payload.
+    """
+    LOGIN_PATH = "/api/auth/login"
+    MODELS_PATH = "/api/models"
+    COMPLETION_ROUTES = ["/api/chat", "/api/v1/chat/completions", "/api/chat/completions"]
+
     def __init__(self, config: dict):
-        self.url = config["url"]
-        self.username = config.get("username", "")
-        self.password = config.get("password", "")
-        self.session_id = config["session_id"]
+        self.url = (config.get("url") or "http://127.0.0.1:7860").strip().rstrip("/")
+        self.username = (config.get("username") or "ai").strip()
+        self.password = (config.get("password") or "").strip()
+        self.session_id = (config.get("session_id") or "").strip()
+        self.model = ""
+        self.active_completion_route = ""
         self.session = requests.Session()
+        self.session.headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "ICfirewall-Daemon/8.44"
+        })
 
-        if self.username and self.password:
-            try:
-                self.session.post(f"{self.url}/api/v1/auths/signin", json={"email": self.username, "password": self.password}, timeout=10)
-            except Exception:
-                pass
+        self._authenticate()
+        self._discover_model()
+        print(f"✅ Native Odysseus ready: {self.url} | user={self.username} | model={self.model} | chat={self.session_id or '(none)'}")
 
+    def _authenticate(self) -> None:
+        login_url = f"{self.url}{self.LOGIN_PATH}"
+        payload = {"username": self.username, "password": self.password}
         try:
-            models = self.session.get(f"{self.url}/api/models", timeout=15)
-            if models.status_code == 200:
-                res_json = models.json()
-                items = res_json.get("items", res_json.get("data", []))
-                self.model = items[0].get("id", "default") if items else "default"
-            else:
-                self.model = "default"
-        except Exception:
-            self.model = "default"
-
-    def complete(self, prompt: str) -> str:
-        chat_payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "chat_id": self.session_id,
-            "session_id": self.session_id,
-            "stream": False,
-        }
-        try:
-            res = self.session.post(f"{self.url}/api/chat/completions", json=chat_payload, timeout=300)
+            res = self.session.post(login_url, json=payload, timeout=15)
             if res.status_code == 200:
                 data = res.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                return clean_model_output(content)
-        except Exception:
-            pass
-        return "Task completed by Odysseus Agent."
+                if data.get("ok"):
+                    print(f"✅ Odysseus session established for user '{self.username}'")
+                    return
+            raise RuntimeError(f"Login failed HTTP {res.status_code}: {res.text[:200]}")
+        except Exception as e:
+            raise RuntimeError(f"Cannot authenticate with Odysseus at {login_url}: {e}") from e
 
-
-def notify_odysseus(prompt: str, response: str):
-    try:
-        title = prompt[:30].replace('"', '\\"') + "..."
-        apple_script = f'display notification "Response sent to remote client" with title "Odysseus: {title}"'
-        subprocess.run(["osascript", "-e", apple_script], check=True, timeout=10)
-    except Exception:
-        pass
-
-
-def main():
-    global BACKEND_CANISTER_ID, DFX_NETWORK, ACTIVE_IDENTITY
-    BACKEND_CANISTER_ID, DFX_NETWORK, ACTIVE_IDENTITY, odysseus_config = setup_wizard()
-
-    if not BACKEND_CANISTER_ID:
-        print("❌ Error: No Backend Canister ID configured.")
-        raise SystemExit(1)
-
-    odysseus_client = OdysseusClient(odysseus_config)
-    print("🛡️ ICfirewall Daemon v7.0 Active and Polling...")
-
-    poll_error_count = 0
-    base_sleep_time = 3.0
-    max_sleep_time = 30.0
-
-    while not should_exit:
+    def _discover_model(self) -> None:
         try:
-            raw_output = call_canister("getPendingPrompt")
-            task = parse_candid_pending_task(raw_output)
+            res = self.session.get(f"{self.url}{self.MODELS_PATH}", timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("items") or data.get("data") or []
+                extracted_models = []
+                for entry in items:
+                    if isinstance(entry, dict):
+                        models_list = entry.get("models") or []
+                        if isinstance(models_list, list):
+                            extracted_models.extend(models_list)
+                        elif isinstance(entry.get("id"), str):
+                            extracted_models.append(entry["id"])
 
-            if poll_error_count > 0:
-                poll_error_count = 0
+                override = os.getenv("ICF_MODEL_OVERRIDE", "").strip()
+                if override and override in extracted_models:
+                    self.model = override
+                elif extracted_models:
+                    self.model = extracted_models[0]
+                else:
+                    self.model = "default"
+                print(f"✅ Selected model: {self.model}")
+                return
+        except Exception as e:
+            print(f"⚠️ Model discovery warning: {e}")
+        self.model = os.getenv("ICF_MODEL_OVERRIDE", "default")
 
-            if task and task.get("prompt"):
-                ticket_id = task.get("ticketId")
-                prompt_text = task.get("prompt")
-                print(f"\n📩 Incoming Prompt [Ticket #{ticket_id}]: {prompt_text[:100]}...")
+    def complete(self, prompt: str) -> str:
+        payload = {
+            "model": self.model,
+            "message": prompt,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        if self.session_id:
+            payload["session"] = self.session_id
+            payload["chat_id"] = self.session_id
+            payload["session_id"] = self.session_id
 
-                reply = odysseus_client.complete(prompt_text)
-                encrypted_reply = encrypt_payload(reply)
+        routes = [self.active_completion_route] if self.active_completion_route else self.COMPLETION_ROUTES
+        
+        last_error = None
+        for route in routes:
+            if not route:
+                continue
+            url = f"{self.url}{route}"
+            try:
+                res = self.session.post(url, json=payload, timeout=300)
+                if res.status_code == 401:
+                    print("⚠️ 401 Session expired — re-authenticating...")
+                    self._authenticate()
+                    res = self.session.post(url, json=payload, timeout=300)
                 
-                clean_ticket_id = int(ticket_id)
-                candid_arg = f"({clean_ticket_id} : nat, {escape_candid_text(encrypted_reply)})"
-                
-                call_canister("saveResult", candid_arg)
-                print(f"⚡ Result saved for Ticket #{clean_ticket_id}.")
-                notify_odysseus(prompt_text, reply)
+                if res.status_code == 200:
+                    self.active_completion_route = route
+                    data = res.json()
+                    content = self._extract_content(data)
+                    reply = clean_model_output(content)
+                    if reply:
+                        return reply[:MAX_REPLY_CHARS]
+                elif res.status_code != 404:
+                    last_error = f"HTTP {res.status_code}: {res.text[:300]}"
+            except Exception as e:
+                last_error = str(e)
 
-            time.sleep(base_sleep_time)
-        except Exception as error:
-            poll_error_count += 1
-            backoff_delay = min(max_sleep_time, base_sleep_time * (1.5 ** (poll_error_count - 1)))
-            print(f"⚠️ Poller Warning (Attempt {poll_error_count}): {error}. Backing off for {backoff_delay:.1f}s...")
-            time.sleep(backoff_delay)
+        raise RuntimeError(f"Completion failed across all routes. Last error: {last_error}")
 
-    print("Daemon stopped cleanly.")
+    @staticmethod
+    def _extract_content(data: dict) -> str:
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            msg = choices[0].get("message") or {}
+            if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                return msg["content"]
+            if isinstance(choices[0].get("content"), str):
+                return choices[0]["content"]
+        for key in ("response", "content", "output", "text"):
+            v = data.get(key)
+            if isinstance(v, str) and v:
+                return v
+        if isinstance(data.get("message"), dict) and isinstance(data["message"].get("content"), str):
+            return data["message"]["content"]
+        return ""
 
 
-if __name__ == "__main__":
-    main()
+# ----------------------------------------------------------------------------- main loop
+def handle(task: dict, llm: OdysseusClient):
+    ticket, lease, private = task["ticket"], task["lease"], task["kind"] == "Private"
+    print(f"Task #{ticket} ({task['kind']}, lease {lease}, attempt {task['attempt']})")
+    try:
+        prompt = decrypt_private_prompt(task) if private else task["text"]
+        reason = scan(prompt) if DAEMON_SCAN else None
+        
+        reply = f"BLOCKED by daemon

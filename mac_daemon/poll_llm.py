@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ICfirewall daemon v8.44 (Native Odysseus Session Field Fix & IBE Support)
+ICfirewall daemon v8.45 (Native Odysseus Session Field Fix, IBE Support & Auto Canister Config)
 """
 import base64
 import getpass
@@ -246,6 +246,55 @@ def setup_wizard() -> dict:
     print("         🛡️ ICfirewall Setup Wizard              ")
     print("==================================================")
 
+    # 1. Retrieve dfx principal and prompt user to configure controllers/canisters
+    try:
+        current_principal = run([DFX_BIN, "identity", "get-principal", "--identity", IDENTITY])
+        print(f"🆔 Current active DFX identity ({IDENTITY}) principal:")
+        print(f"   👉 {current_principal}")
+        print("\n[!] Please ensure this principal is added as a controller/master to your canisters if required.")
+    except Exception as e:
+        print(f"⚠️ Could not fetch DFX principal automatically: {e}")
+
+    # 2. Canister IDs prompt and persistence to canister_ids.json
+    saved_canister_ids = {}
+    if CANISTER_IDS_PATH.exists():
+        try:
+            saved_canister_ids = json.loads(CANISTER_IDS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # Extract defaults from existing canister_ids.json or environment
+    default_backend = CANISTER_ID
+    for net_key in [DFX_NETWORK, "local", "ic"]:
+        if net_key in saved_canister_ids and isinstance(saved_canister_ids[net_key], dict):
+            if saved_canister_ids[net_key].get("relay_backend"):
+                default_backend = saved_canister_ids[net_key]["relay_backend"]
+                break
+
+    print("\n--- Canister Configuration ---")
+    entered_backend = input(f"Enter Backend Canister ID [{default_backend}]: ").strip() or default_backend
+    entered_frontend = input(f"Enter Frontend Canister ID [optional]: ").strip()
+
+    # Update global runtime canister ID
+    global CANISTER_ID
+    CANISTER_ID = entered_backend
+
+    # Save to canister_ids.json in standard DFX multi-network schema format
+    canister_data = saved_canister_ids if isinstance(saved_canister_ids, dict) else {}
+    if DFX_NETWORK not in canister_data or not isinstance(canister_data[DFX_NETWORK], dict):
+        canister_data[DFX_NETWORK] = {}
+    
+    canister_data[DFX_NETWORK]["relay_backend"] = entered_backend
+    if entered_frontend:
+        canister_data[DFX_NETWORK]["relay_frontend"] = entered_frontend
+
+    try:
+        CANISTER_IDS_PATH.write_text(json.dumps(canister_data, indent=2), encoding="utf-8")
+        print(f"✅ Saved canister IDs to {CANISTER_IDS_PATH.name}")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not save canister_ids.json: {e}")
+
+    # 3. Odysseus Config Setup
     saved_config = {}
     if ODYSSEUS_CONFIG_PATH.exists():
         try:
@@ -257,6 +306,8 @@ def setup_wizard() -> dict:
     saved_url = saved_config.get("url", default_url)
     if not saved_url or "/" in saved_url and not saved_url.startswith("http"):
         saved_url = default_url
+    
+    print("\n--- Odysseus LLM Configuration ---")
     odysseus_url = input(f"Odysseus URL [{saved_url}]: ").strip() or saved_url
 
     saved_user = saved_config.get("username", "ai")
@@ -320,7 +371,7 @@ class OdysseusClient:
         self.session.headers.update({
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "ICfirewall-Daemon/8.44"
+            "User-Agent": "ICfirewall-Daemon/8.45"
         })
 
         self._authenticate()
@@ -435,4 +486,48 @@ def handle(task: dict, llm: OdysseusClient):
         prompt = decrypt_private_prompt(task) if private else task["text"]
         reason = scan(prompt) if DAEMON_SCAN else None
         
-        reply = f"BLOCKED by daemon
+        if reason:
+            print(f"🚨 Blocked threat on task #{ticket}: {reason}")
+            reply = f"BLOCKED: Security violation detected ({reason})"
+        else:
+            print(f"🤖 Processing prompt for task #{ticket}...")
+            reply = llm.complete(prompt)
+
+        if private:
+            sealed = seal_result(ticket, reply)
+            call_canister("savePrivateResult", f"({ticket} : nat, {lease} : nat, {text_literal(sealed)})")
+        else:
+            call_canister("saveInspectedResult", f"({ticket} : nat, {lease} : nat, {text_literal(reply)})")
+        print(f"✅ Completed task #{ticket}")
+
+    except Exception as e:
+        print(f"❌ Error handling task #{ticket}: {e}")
+        try:
+            call_canister("reportFailure", f"({ticket} : nat, {lease} : nat, {text_literal(str(e))})")
+        except Exception as inner:
+            print(f"⚠️ Failed to report failure to canister: {inner}")
+
+
+def main():
+    config = setup_wizard()
+    llm = OdysseusClient(config)
+
+    print(f"\n🚀 ICfirewall daemon polling active. Canister: {CANISTER_ID}, Identity: {IDENTITY}, Network: {DFX_NETWORK}")
+    while not should_exit:
+        try:
+            out = call_canister("getPendingPrompt", timeout=30)
+            task = parse_pending_task(out)
+            if task:
+                handle(task, llm)
+            else:
+                time.sleep(2)
+        except Exception as e:
+            if not should_exit:
+                print(f"⚠️ Polling error: {e}")
+                time.sleep(5)
+
+    print("👋 Daemon exited cleanly.")
+
+
+if __name__ == "__main__":
+    main()

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ICfirewall Command Center (v7.0 E2EE & vetKDS)</title>
+    <title>ICfirewall Command Center (v8.8 Full IBE & vetKDS)</title>
     <meta name="theme-color" content="#08090c">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -14,7 +14,7 @@
         <header class="topbar">
             <a class="brand" href="/" aria-label="ICfirewall Command Center">
                 <span class="brand-mark"><span></span></span>
-                <span><strong>ICfirewall</strong><small>v7.0 E2EE & vetKDS CENTER</small></span>
+                <span><strong>ICfirewall</strong><small>v8.8 FULL IBE & vetKDS CENTER</small></span>
             </a>
             <div class="topbar-meta">
                 <div id="auth-container" class="auth-wrapper">
@@ -37,9 +37,9 @@
 
         <section class="hero-row">
             <div class="hero-copy">
-                <p class="eyebrow"><span class="eyebrow-line"></span> END-TO-END ENCRYPTION & VETKDS</p>
+                <p class="eyebrow"><span class="eyebrow-line"></span> FULL IDENTITY-BASED ENCRYPTION & VETKDS</p>
                 <h1>Keep every prompt<br><em>inside the line.</em></h1>
-                <p class="hero-description">A privacy-first decentralized perimeter for local AI intelligence with AES-GCM session encryption, cryptographic guardrails, and threshold vetKDS keys.</p>
+                <p class="hero-description">A privacy-first decentralized perimeter for local AI intelligence with Full IBE encryption, cryptographic guardrails, and threshold vetKDS keys.</p>
             </div>
         </section>
 
@@ -139,19 +139,27 @@
                 </div>
             </div>
 
-            <!-- E2EE Session Key & vetKDS Vault Studio Integration -->
             <div class="studio-card" style="margin-top: 16px;">
-                <h3>🔐 AES-GCM & vetKDS Cryptographic Vault</h3>
-                <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Active session encryption keys ensure prompts are encrypted client-side. System vetKDS threshold keys provide decentralized master derivation.</p>
+                <h3>🔐 Full IBE & vetKDS Cryptographic Vault</h3>
+                <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Identity-Based Encryption (IBE) binds messages directly to ticket identities using the canister's threshold master public key.</p>
                 <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
-                    <span id="e2ee-status" style="font-family:'DM Mono',monospace; font-size:11px; color:var(--emerald);">AES-GCM: Active (256-bit)</span>
+                    <span id="e2ee-status" style="font-family:'DM Mono',monospace; font-size:11px; color:var(--emerald);">Full IBE: Active</span>
                     <button id="fetch-vetkey-btn" class="network-pill interactive-btn" style="padding: 6px 12px; font-size: 11px;" type="button">Fetch vetKDS Public Key</button>
                 </div>
                 <div id="vetkey-display" style="margin-top: 8px; font-family:'DM Mono',monospace; font-size:10px; color:var(--faint); word-break: break-all;"></div>
             </div>
+
+            <!-- ONE-CLICK DAEMON AUTHORIZATION CARD -->
+            <div class="studio-card" style="margin-top: 16px; border: 1px solid rgba(59, 130, 246, 0.4);">
+                <h3>🤖 Authorize Daemon Principal</h3>
+                <p style="color:var(--faint); font-size:12px; margin-bottom:12px;">Click to authorize your local <code>icf-daemon</code> principal on-chain so it can process queued tasks.</p>
+                <button id="auth-daemon-btn" class="network-pill send-btn" type="button">
+                    <span>Authorize icf-daemon Now</span>
+                    <span class="mode-arrow">&#8594;</span>
+                </button>
+            </div>
         </section>
 
-        <!-- Dynamic User Principal ID Clipboard Widget -->
         <section class="control-panel glass-panel" id="pid-vault-panel" style="margin-top: 16px;">
             <div class="panel-heading" style="margin-bottom: 8px;">
                 <div>
@@ -164,7 +172,7 @@
                 <div style="font-family: monospace; font-size: 13px; color: #a1a1aa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;" id="userPidDisplay">
                     Not logged in (Click II Passkey Login above)
                 </div>
-                <button onclick="copyUserPid()" id="copyPidBtn" style="background: linear-gradient(135deg, #3b82f6, #2563eb); border: none; color: white; padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 8px; cursor: pointer; transition: all 0.2s ease;" type="button">
+                <button id="copyPidBtn" style="background: linear-gradient(135deg, #3b82f6, #2563eb); border: none; color: white; padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 8px; cursor: pointer; transition: all 0.2s ease;" type="button">
                     Copy PID
                 </button>
             </div>
@@ -178,8 +186,11 @@
                     <h2>Prompt Sandbox & History</h2>
                 </div>
                 <div style="display:flex; align-items:center; gap:12px;">
+                    <label class="toggle-label" style="font-size: 11px;">
+                        <input type="checkbox" id="private-toggle"> Full IBE Private Mode
+                    </label>
                     <button id="clear-history-btn" class="network-pill interactive-btn" style="padding: 4px 10px; font-size: 9px;" type="button">Clear History</button>
-                    <span class="live-label"><span class="pulse-dot"></span> E2EE SECURE</span>
+                    <span class="live-label"><span class="pulse-dot"></span> SECURE PERIMETER</span>
                 </div>
             </div>
 
@@ -232,7 +243,10 @@
                     <p class="section-kicker">SECURITY TELEMETRY</p>
                     <h2>Threat vault</h2>
                 </div>
-                <span class="vault-count">LAST 10 EVENTS</span>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button id="export-telemetry-btn" class="network-pill interactive-btn" style="padding:4px 10px; font-size:9px;" type="button">Export Logs JSON</button>
+                    <span class="vault-count">LAST 10 EVENTS</span>
+                </div>
             </div>
             <div class="table-wrap">
                 <table id="threat-table">
@@ -254,22 +268,44 @@
         </footer>
     </main>
 
+    <!-- Failsafe Inline Fallback Handlers for Clock & Top Buttons -->
     <script>
-    function copyUserPid() {
-        const pidText = document.getElementById("userPidDisplay").innerText.trim();
-        if (pidText.startsWith("Not logged in")) {
-            alert("Please log in with Internet Identity first to copy your Principal ID.");
-            return;
+        function updateClock() {
+            const timeEl = document.getElementById('topbar-time');
+            if (timeEl) {
+                const now = new Date();
+                timeEl.innerText = now.toTimeString().split(' ')[0];
+            }
         }
-        navigator.clipboard.writeText(pidText).then(() => {
-            const btn = document.getElementById("copyPidBtn");
-            btn.innerText = "Copied! ✨";
-            setTimeout(() => { btn.innerText = "Copy PID"; }, 2000);
-        }).catch(err => {
-            console.error("Failed to copy PID: ", err);
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        document.getElementById('coffee-btn')?.addEventListener('click', () => {
+            const coffeePrincipal = "57fkl-hfo3q-4sije-2dfvt-ikhqe-ti54q-ysccf-555lf-zc4bm-nykce-lae";
+            navigator.clipboard.writeText(coffeePrincipal).then(() => {
+                alert('Developer coffee principal copied: ' + coffeePrincipal);
+            });
         });
-    }
+
+        document.getElementById('dev-website-btn')?.addEventListener('click', () => {
+            window.open('https://2n2uw-uaaaa-aaaag-at2hq-cai.icp.net', '_blank');
+        });
+
+        document.getElementById('copyPidBtn')?.addEventListener('click', () => {
+            const pidText = document.getElementById("userPidDisplay")?.innerText.trim();
+            if (!pidText || pidText.startsWith("Not logged in")) {
+                alert("Please log in with Internet Identity first.");
+                return;
+            }
+            navigator.clipboard.writeText(pidText).then(() => {
+                const btn = document.getElementById("copyPidBtn");
+                if (btn) {
+                    btn.innerText = "Copied! ✨";
+                    setTimeout(() => { btn.innerText = "Copy PID"; }, 2000);
+                }
+            });
+        });
     </script>
-    <script type="module" src="main.js?v=37"></script>
+    <script type="module" src="main.ts"></script>
 </body>
 </html>

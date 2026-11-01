@@ -4,825 +4,921 @@ import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
+import Nat8 "mo:base/Nat8";
+import Nat32 "mo:base/Nat32";
 import Char "mo:base/Char";
+import Iter "mo:base/Iter";
 import RBTree "mo:base/RBTree";
 import Buffer "mo:base/Buffer";
 import Timer "mo:base/Timer";
+import Debug "mo:base/Debug";
+import Cycles "mo:base/ExperimentalCycles";
 
-actor RelayBackend {
+shared ({ caller = installer }) actor class RelayBackend() {
 
-  module ManagementCanister {
-    public type Curve = {
-      #bls12_381_g1;
-      #bls12_381_g2;
-    };
-
-    public type KeyId = {
-      curve : Curve;
-      name : Text;
-    };
-
-    public type VetKdPublicKeyRequest = {
-      canister_id : ?Principal;
-      derivation_path : [Blob];
-      key_id : KeyId;
-    };
-
-    public type VetKdPublicKeyResponse = {
-      public_key : Blob;
-    };
-
-    public func vetKdPublicKey(
-      canister_id : ?Principal,
-      derivation_path : Blob,
-      key_id : KeyId
-    ) : async Blob {
-      let mgmt = actor ("aaaaa-aa") : actor {
-        vet_keys_public_key : VetKdPublicKeyRequest -> async VetKdPublicKeyResponse;
-      };
-      let res = await mgmt.vet_keys_public_key({
-        canister_id;
-        derivation_path = [derivation_path];
-        key_id;
-      });
-      res.public_key
-    };
-  };
-
+  // ---------------------------------------------------------------- types
   public type FirewallMode = { #Off; #Medium; #On };
-
-  public type ThreatEvent = {
-    timestamp : Int;
-    threatType : Text;
-    severity : Text;
-    snippet : Text;
-  };
-
+  public type InitializationState = { #Uninitialized; #Initializing; #Initialized };
+  public type ThreatEvent = { timestamp : Int; threatType : Text; severity : Text; snippet : Text };
   public type SystemStats = {
-    mode : Text;
-    totalProcessed : Nat;
-    totalBlocked : Nat;
-    activeQueueLength : Nat;
-    masterPid : Text;
-    daemonPid : Text;
-    adminCount : Nat;
+    mode : Text; totalProcessed : Nat; totalBlocked : Nat; activeQueueLength : Nat;
+    adminCount : Nat; masterPid : Text; daemonPid : Text;
   };
+  public type PromptResult = { allowed : Bool; mode : Text; response : Text; reason : Text; ticketId : ?Nat };
 
-  public type PromptResult = {
-    allowed : Bool;
-    mode : Text;
-    response : Text;
-    reason : Text;
-    ticketId : ?Nat;
+  public type TicketState = {
+    #Reserved; #Submitted; #Processing : (Int, Nat); #Completed; #DeadLetter; #Expired;
   };
-
-  public type PendingTask = {
-    ticketId : Nat;
-    prompt : Text;
+  public type TaskType = { #Inspected : Text; #Private : Blob };
+  public type PendingTask = { ticketId : Nat; taskType : TaskType; leaseToken : Nat; attemptCount : Nat };
+  public type TicketReservationRecord = {
+    owner : Principal; queueSlotReserved : Bool; resultCapacityReserved : Bool; bytesReserved : Nat;
+    principalQuotaReserved : Bool; activeCounted : Bool; released : Bool;
   };
-
   public type SecurityRulesConfig = {
-    blockPromptInjection : Bool;
-    blockDestructiveCommands : Bool;
-    blockPrivilegeEscalation : Bool;
-    maxContextLength : Nat;
+    blockPromptInjection : Bool; blockDestructiveCommands : Bool;
+    blockPrivilegeEscalation : Bool; maxContextLength : Nat;
   };
 
-  public type HeaderField = (Text, Text);
-  public type HttpRequest = {
-    method : Text;
-    url : Text;
-    headers : [HeaderField];
-    body : Blob;
+  type VetKdKeyId = { curve : { #bls12_381_g2 }; name : Text };
+  type MgmtActor = actor {
+    vetkd_public_key : ({ canister_id : ?Principal; context : Blob; key_id : VetKdKeyId }) -> async { public_key : Blob };
+    vetkd_derive_key : ({ input : Blob; context : Blob; transport_public_key : Blob; key_id : VetKdKeyId }) -> async { encrypted_key : Blob };
   };
-  public type HttpResponse = {
-    status_code : Nat16;
-    headers : [HeaderField];
-    body : Blob;
-    upgrade : ?Bool;
-  };
+  private let mgmt : MgmtActor = actor ("aaaaa-aa");
 
+  // ---------------------------------------------------------------- constants
   private let MAX_QUEUE_LIMIT : Nat = 200;
+  private let MAX_ACTIVE_TICKETS : Nat = 150;
+  private let MAX_GLOBAL_RESERVATIONS : Nat = 100;
+  private let MAX_PRINCIPAL_RESERVATIONS : Nat = 5;
+  private let MAX_PRINCIPAL_ACTIVE : Nat = 10;
+  private let MAX_RETAINED_RESULTS : Nat = 1000;
+  private let MAX_RETAINED_BYTES : Nat = 10 * 1024 * 1024;
+  private let EXPECTED_MAX_RESPONSE_BYTES : Nat = 64000;
+  private let MAX_RETRY_COUNT : Nat = 3;
   private let HARD_MAX_PROMPT : Nat = 20000;
+  private let MAX_CIPHERTEXT_BYTES : Nat = 64000;
+  private let MAX_THREAT_LOG : Nat = 50;
+  private let MAX_ADMINS : Nat = 10;
+  private let MAX_DERIVES_PER_TICKET : Nat = 4;
+  private let RATE_GAP_NS : Int = 500_000_000;
   private let RESULT_TTL_NS : Int = 86_400_000_000_000;
+  private let TOMBSTONE_TTL_NS : Int = 86_400_000_000_000;
+  private let RESERVATION_TTL_NS : Int = 300_000_000_000;
+  private let LEASE_TIMEOUT_NS : Int = 600_000_000_000;
+  // key_1 = production key. test_key_1 is a TEST key: do not use it if you claim confidentiality.
+  private let KEY_ID : VetKdKeyId = { curve = #bls12_381_g2; name = "key_1" };
+  // MUST equal VETKD_CONTEXT in crypto.ts and the daemon helper.
+  private let VETKD_CONTEXT : Blob = Text.encodeUtf8("icfirewall_ibe_v1");
+  // key_1 derive costs 26_153_846_153 cycles; unused cycles are refunded.
+  private let VETKD_DERIVE_CYCLES : Nat = 27_000_000_000;
+  private let MIN_CYCLES_FLOOR : Nat = 60_000_000_000;
+  private let TRANSPORT_KEY_BYTES : Nat = 48;
+  private let KIND_PROMPT : Nat8 = 1;
+  private let KIND_RESULT : Nat8 = 2;
 
+  private let INJECTION_PATTERNS : [Text] = [
+    "ignore previous instructions", "ignore all previous", "ignore the above", "ignore prior instructions",
+    "disregard previous", "disregard all prior", "disregard your instructions", "forget your instructions",
+    "forget all previous", "reveal your system prompt", "print your system prompt", "developer mode",
+    "jailbreak", "do anything now"
+  ];
+  private let DESTRUCTIVE_PATTERNS : [Text] = [
+    "rm -rf", "rm -fr", "rm -r -f", "drop database", "drop table", "truncate table", "mkfs", "dd if=",
+    "format c:", "> /dev/sda", ":(){", "shred -", "del /f /s"
+  ];
+  private let PRIVILEGE_PATTERNS : [Text] = [
+    "chmod 777", "chmod -r 777", "su root", "su -", "chown root", "setuid", "visudo", "/etc/sudoers"
+  ];
+  private let STRICT_PATTERNS : [Text] = [
+    "pretend to be", "act as if", "system override", "you are now", "bypass safety", "bypass your safety",
+    "without any restrictions", "no restrictions"
+  ];
+
+  // ---------------------------------------------------------------- stable state (unchanged layout)
+  stable var schemaVersion : Nat = 8;
   stable var currentMode : FirewallMode = #Medium;
+  stable var initStatus : InitializationState = #Uninitialized;
   stable var totalProcessed : Nat = 0;
   stable var totalBlocked : Nat = 0;
   stable var nextTicketId : Nat = 1;
+  stable var nextLeaseCounter : Nat = 1;
+  stable var currentRetainedBytes : Nat = 0;
+  stable var currentReservedBytes : Nat = 0;
+  stable var reservedResultCount : Nat = 0;
+  stable var activeReservedPrivateTicketsCount : Nat = 0;
+  stable var cachedVetKeyPublicKey : ?Blob = null;
+  stable var isFetchingVetKey : Bool = false; // kept only for upgrade compatibility
 
   stable var masterPrincipal : ?Principal = null;
   stable var daemonPrincipal : ?Principal = null;
   stable var adminPrincipals : [Principal] = [];
-  stable var lastPromptTime : Int = 0;
+  stable var activeReservationCount : Nat = 0;
+  stable var activeTicketsCount : Nat = 0;
 
-  private var cleanupTimerId : ?Timer.TimerId = null;
+  stable var stableQueue : [Nat] = [];
+  stable var stableTicketStates : [(Nat, TicketState)] = [];
+  stable var stableTimestamps : [(Nat, Int)] = [];
+  stable var stableResultTimestamps : [(Nat, Int)] = [];
+  stable var stableTerminalTimestamps : [(Nat, Int)] = [];
+  stable var stableAttemptCounts : [(Nat, Nat)] = [];
+  stable var stableTaskPayloads : [(Nat, TaskType)] = [];
+  stable var stableResults : [(Nat, Text)] = [];
+  stable var stableSubmitters : [(Nat, Principal)] = [];
+  stable var stableTransportKeys : [(Nat, Blob)] = []; // legacy, unused
+  stable var stableTicketResRecords : [(Nat, TicketReservationRecord)] = [];
+  stable var stableRateLimits : [(Principal, Int)] = [];
+  stable var stablePrincipalResCounts : [(Principal, Nat)] = [];
+  stable var stableThreatLogData : [ThreatEvent] = [];
 
   stable var securityRulesConfig : SecurityRulesConfig = {
-    blockPromptInjection = true;
-    blockDestructiveCommands = true;
-    blockPrivilegeEscalation = true;
-    maxContextLength = 12000;
+    blockPromptInjection = true; blockDestructiveCommands = true;
+    blockPrivilegeEscalation = true; maxContextLength = 12000;
   };
 
-  stable var threatLog : [var ?ThreatEvent] = [var null, null, null, null, null, null, null, null, null, null];
-  stable var logPointer : Nat = 0;
+  // new in v8.8 (adding stable vars is upgrade-safe)
+  stable var pendingMaster : ?Principal = null;
+  stable var stablePrivateTickets : [Nat] = [];
 
-  private var promptQueueBuffer = Buffer.Buffer<Nat>(10);
-  private var promptsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
-  private var resultsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
-  private var resultTimestamps = RBTree.RBTree<Nat, Int>(Nat.compare);
-  private var submittersMap = RBTree.RBTree<Nat, Principal>(Nat.compare);
+  // ---------------------------------------------------------------- runtime state
+  private let promptQueue = Buffer.Buffer<Nat>(16);
+  private let ticketStates = RBTree.RBTree<Nat, TicketState>(Nat.compare);
+  private let reservationTimestamps = RBTree.RBTree<Nat, Int>(Nat.compare);
+  private let resultTimestamps = RBTree.RBTree<Nat, Int>(Nat.compare);
+  private let terminalTimestamps = RBTree.RBTree<Nat, Int>(Nat.compare);
+  private let attemptCounts = RBTree.RBTree<Nat, Nat>(Nat.compare);
+  private let taskPayloads = RBTree.RBTree<Nat, TaskType>(Nat.compare);
+  private let resultsMap = RBTree.RBTree<Nat, Text>(Nat.compare);
+  private let submittersMap = RBTree.RBTree<Nat, Principal>(Nat.compare);
+  private let ticketResRecords = RBTree.RBTree<Nat, TicketReservationRecord>(Nat.compare);
+  private let principalRateLimits = RBTree.RBTree<Principal, Int>(Principal.compare);
+  private let privateTickets = RBTree.RBTree<Nat, Bool>(Nat.compare);
+  private let deriveCounts = RBTree.RBTree<Nat, Nat>(Nat.compare);
+  private let principalActive = RBTree.RBTree<Principal, Nat>(Principal.compare);
+  private let principalReservationCounts = RBTree.RBTree<Principal, Nat>(Principal.compare);
+  private let threatLog = Buffer.Buffer<ThreatEvent>(16);
+  private var rateLimitEntries : Nat = 0;
 
-  private func runCleanup() {
-    let now = Time.now();
-    let expiredKeys = Buffer.Buffer<Nat>(10);
+  // ---------------------------------------------------------------- small helpers
+  private func sub(a : Nat, b : Nat) : Nat { if (a >= b) { a - b } else { 0 } };
 
-    for (entry in resultTimestamps.entries()) {
-      let (ticket, timestamp) = entry;
-      if (now - timestamp > RESULT_TTL_NS) {
-        expiredKeys.add(ticket);
-      };
-    };
-
-    for (ticket in expiredKeys.vals()) {
-      ignore resultsMap.remove(ticket);
-      ignore resultTimestamps.remove(ticket);
-      ignore submittersMap.remove(ticket);
-      ignore promptsMap.remove(ticket);
-    };
+  private func modeName(m : FirewallMode) : Text {
+    switch (m) { case (#Off) { "OFF" }; case (#Medium) { "MEDIUM" }; case (#On) { "ON" } }
   };
 
-  system func postupgrade() {
-    switch (cleanupTimerId) {
-      case (?id) { Timer.cancelTimer(id); };
-      case (null) {};
-    };
-    cleanupTimerId := ?Timer.recurringTimer<system>(
-      #seconds 3600,
-      func () : async () {
-        runCleanup();
-      }
-    );
+  private func dump<K, V>(t : RBTree.RBTree<K, V>) : [(K, V)] { Iter.toArray(t.entries()) };
+  private func load<K, V>(t : RBTree.RBTree<K, V>, items : [(K, V)]) {
+    for ((k, v) in items.vals()) { t.put(k, v) };
   };
 
-  private func previewText(t : Text, maxLen : Nat) : Text {
-    if (t.size() <= maxLen) { return t };
-    var result = "";
-    var count : Nat = 0;
-    for (c in t.chars()) {
-      if (count >= maxLen) { return result };
-      result #= Text.fromChar(c);
-      count += 1;
+  private func ticketIdentity(kind : Nat8, ticket : Nat) : Blob {
+    let b = Buffer.Buffer<Nat8>(9);
+    b.add(kind);
+    var i : Nat = 0;
+    while (i < 8) {
+      b.add(Nat8.fromNat((ticket / Nat.pow(256, 7 - i)) % 256));
+      i += 1;
     };
-    result
+    Blob.fromArray(Buffer.toArray(b))
   };
 
-  private func logThreat(threatType : Text, severity : Text, snippet : Text) {
-    threatLog[logPointer] := ?{
-      timestamp = Time.now();
-      threatType;
-      severity;
-      snippet;
-    };
-    logPointer := (logPointer + 1) % 10;
-    totalBlocked += 1;
-  };
-
-  private func getMasterText() : Text {
-    switch (masterPrincipal) {
-      case (?p) { Principal.toText(p) };
-      case (null) { "Unassigned" };
-    }
+  private func parsePrincipal(t : Text) : Principal {
+    if (Text.size(t) == 0 or Text.size(t) > 63) { Debug.trap("Error: Invalid principal text."); };
+    let p = Principal.fromText(t); // traps on malformed input
+    if (Principal.isAnonymous(p)) { Debug.trap("Error: Anonymous principal is not allowed."); };
+    p
   };
 
   private func isMaster(p : Principal) : Bool {
-    switch (masterPrincipal) {
-      case (?mp) { mp == p };
-      case (null) { false };
-    }
+    switch (masterPrincipal) { case (?m) { m == p }; case null { false } }
+  };
+  private func isAdmin(p : Principal) : Bool {
+    for (a in adminPrincipals.vals()) { if (a == p) { return true } };
+    false
+  };
+  private func isAdminOrMaster(p : Principal) : Bool { isMaster(p) or isAdmin(p) };
+  private func isDaemon(p : Principal) : Bool {
+    switch (daemonPrincipal) { case (?d) { d == p }; case null { false } }
+  };
+  private func assertDaemon(p : Principal) {
+    if (not isDaemon(p)) { Debug.trap("Unauthorized: caller is not the authorized daemon."); };
+  };
+  private func assertNotAnonymous(p : Principal) {
+    if (Principal.isAnonymous(p)) { Debug.trap("Unauthorized: anonymous caller."); };
   };
 
-  private func isAdminOrMaster(p : Principal) : Bool {
-    if (isMaster(p)) { return true };
-    for (admin in adminPrincipals.vals()) {
-      if (admin == p) { return true };
+  private func deny(mode : Text, reason : Text, short : Text) : PromptResult {
+    { allowed = false; mode; response = "BLOCKED: " # reason; reason = short; ticketId = null }
+  };
+
+  // ---------------------------------------------------------------- per-principal counters
+  private func incMap(m : RBTree.RBTree<Principal, Nat>, p : Principal) {
+    let cur = switch (m.get(p)) { case (?c) { c }; case null { 0 } };
+    m.put(p, cur + 1);
+  };
+  private func decMap(m : RBTree.RBTree<Principal, Nat>, p : Principal) {
+    switch (m.get(p)) {
+      case (?c) { if (c > 1) { m.put(p, c - 1) } else { ignore m.remove(p) } };
+      case null {};
     };
+  };
+  private func getCount(m : RBTree.RBTree<Principal, Nat>, p : Principal) : Nat {
+    switch (m.get(p)) { case (?c) { c }; case null { 0 } }
+  };
+
+  // ---------------------------------------------------------------- reservation accounting (never traps)
+  private func releaseReservation(ticket : Nat) {
+    switch (ticketResRecords.get(ticket)) {
+      case null {};
+      case (?rec) {
+        if (rec.released) { return };
+        if (rec.queueSlotReserved) { activeReservedPrivateTicketsCount := sub(activeReservedPrivateTicketsCount, 1) };
+        if (rec.resultCapacityReserved) { reservedResultCount := sub(reservedResultCount, 1) };
+        currentReservedBytes := sub(currentReservedBytes, rec.bytesReserved);
+        if (rec.principalQuotaReserved) {
+          decMap(principalReservationCounts, rec.owner);
+          activeReservationCount := sub(activeReservationCount, 1);
+        };
+        if (rec.activeCounted) {
+          activeTicketsCount := sub(activeTicketsCount, 1);
+          decMap(principalActive, rec.owner);
+        };
+        ticketResRecords.put(ticket, {
+          rec with queueSlotReserved = false; resultCapacityReserved = false; bytesReserved = 0;
+          principalQuotaReserved = false; activeCounted = false; released = true;
+        });
+      };
+    };
+  };
+
+  // Moves a ticket into a terminal state and frees everything it held.
+  private func finishTicket(ticket : Nat, st : TicketState) {
+    ticketStates.put(ticket, st);
+    terminalTimestamps.put(ticket, Time.now());
+    ignore taskPayloads.remove(ticket);
+    ignore attemptCounts.remove(ticket);
+    ignore reservationTimestamps.remove(ticket);
+    releaseReservation(ticket);
+  };
+
+  private func queueContains(ticket : Nat) : Bool {
+    for (t in promptQueue.vals()) { if (t == ticket) { return true } };
     false
   };
 
-  public shared func getVetKeyPublicKey() : async Blob {
-    await ManagementCanister.vetKdPublicKey(
-      null,
-      Text.encodeUtf8("icfirewall_payload_v7"),
-      { curve = #bls12_381_g2; name = "test_key_1" }
-    )
-  };
-
-  private func collapseWhitespace(t : Text) : Text {
-    var result = "";
-    var lastWasSpace = true;
-    for (c in t.chars()) {
-      let code = Char.toNat32(c);
-      let isWs = 
-        code == 0x20 or code == 0x09 or code == 0x0A or code == 0x0D or 
-        code == 0x0B or code == 0x0C or code == 0xA0 or code == 0x85 or
-        code == 0x1680 or code == 0x2028 or code == 0x2029 or
-        (code >= 0x2000 and code <= 0x200A) or 
-        code == 0x202F or code == 0x205F or code == 0x3000;
-
-      if (isWs) {
-        if (not lastWasSpace) {
-          result #= " ";
-          lastWasSpace := true;
+  // ---------------------------------------------------------------- rate limiting
+  private func enforceRateLimit(caller : Principal) : Bool {
+    let now = Time.now();
+    switch (principalRateLimits.get(caller)) {
+      case (?last) { if (now - last < RATE_GAP_NS) { return false } };
+      case null {
+        if (rateLimitEntries >= 2000) {
+          let stale = Buffer.Buffer<Principal>(16);
+          for ((p, t) in principalRateLimits.entries()) { if (now - t > 60_000_000_000) { stale.add(p) } };
+          for (p in stale.vals()) { ignore principalRateLimits.remove(p); rateLimitEntries := sub(rateLimitEntries, 1) };
+          // fail closed only at a hard ceiling, so a flood of fresh principals cannot lock everyone out
+          if (rateLimitEntries >= 20000) { return false };
         };
-      } else {
-        result #= Text.fromChar(c);
-        lastWasSpace := false;
+        rateLimitEntries += 1;
       };
     };
-    result
+    principalRateLimits.put(caller, now);
+    true
   };
 
-  private func stripZeroWidth(t : Text) : Text {
-    var result = "";
-    for (c in t.chars()) {
-      let code = Char.toNat32(c);
-      let isZeroWidth =
-        code == 0x200B or code == 0x200C or code == 0x200D or code == 0xFEFF or
-        code == 0x00AD or code == 0x200E or code == 0x200F or code == 0x2060 or
-        (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069);
-      if (not isZeroWidth) {
-        result #= Text.fromChar(c);
-      };
-    };
-    result
+  // ---------------------------------------------------------------- scanner (inspected prompts only)
+  private func isIgnorable(code : Nat32) : Bool {
+    (code >= 0x200B and code <= 0x200F) or (code >= 0x202A and code <= 0x202E) or
+    (code >= 0x2060 and code <= 0x2064) or code == 0xFEFF or code == 0x00AD or
+    (code >= 0xE0000 and code <= 0xE007F)
   };
 
+  // lowercase, drop zero-width / bidi / tag characters, collapse whitespace
   private func normalizeForScan(t : Text) : Text {
-    var folded = "";
-    for (c in t.chars()) {
+    let out = Buffer.Buffer<Char>(64);
+    var lastSpace = true;
+    for (c in Text.toLowercase(t).chars()) {
       let code = Char.toNat32(c);
-      if (code >= 0xFF01 and code <= 0xFF5E) {
-        folded #= Text.fromChar(Char.fromNat32(code - 0xFEE0));
-      } else {
-        folded #= Text.fromChar(c);
+      if (not isIgnorable(code)) {
+        if (Char.isWhitespace(c) or code == 0x00A0) {
+          if (not lastSpace) { out.add(' '); lastSpace := true };
+        } else {
+          out.add(c);
+          lastSpace := false;
+        };
       };
     };
-
-    var s = Text.toLowercase(folded);
-    s := stripZeroWidth(s);
-    s := Text.replace(s, #text "${ifs}", " ");
-    s := Text.replace(s, #text "$ifs", " ");
-    s := Text.replace(s, #text "\\t", " ");
-    s := Text.replace(s, #text "\\n", " ");
-    s := collapseWhitespace(s);
-    s
+    Text.fromIter(out.vals())
   };
 
-  private func shellView(t : Text) : Text {
-    var r = "";
-    for (c in t.chars()) {
-      let k = Char.toNat32(c);
-      let keep =
-        (k >= 0x61 and k <= 0x7A) or (k >= 0x30 and k <= 0x39) or
-        k == 0x20 or k == 0x2D or k == 0x2F or k == 0x2E or k == 0x3D or k == 0x5F or k > 0x7F;
-      if (keep) { r #= Text.fromChar(c) } else { r #= " " };
-    };
-    " " # collapseWhitespace(r) # " "
+  private func wordsOf(norm : Text) : [Text] {
+    Iter.toArray(Text.split(norm, #predicate(func (c : Char) : Bool { not (Char.isAlphabetic(c) or Char.isDigit(c)) })))
   };
-
-  private func hit(a : Text, b : Text, p : Text) : Bool {
-    Text.contains(a, #text p) or Text.contains(b, #text p)
+  private func hasWord(words : [Text], w : Text) : Bool {
+    for (x in words.vals()) { if (x == w) { return true } };
+    false
   };
-
-  private func containsWord(haystack : Text, word : Text) : Bool {
-    if (haystack == word) { return true };
-    if (Text.startsWith(haystack, #text (word # " "))) { return true };
-    if (Text.endsWith(haystack, #text (" " # word))) { return true };
-    if (Text.contains(haystack, #text (" " # word # " "))) { return true };
+  private func hasPattern(norm : Text, patterns : [Text]) : Bool {
+    for (p in patterns.vals()) { if (Text.contains(norm, #text p)) { return true } };
     false
   };
 
-  private func deleet(t : Text) : Text {
-    var result = "";
+  // Heuristic only. Treat it as a speed bump, not a boundary: the daemon must scan again after decryption.
+  private func scanForThreats(payload : Text, strict : Bool) : ?(Text, Text) {
+    let cfg = securityRulesConfig;
+    if (cfg.maxContextLength > 0 and Blob.toArray(Text.encodeUtf8(payload)).size() > cfg.maxContextLength) {
+      return ?("Context length exceeded", "MEDIUM");
+    };
+    let norm = normalizeForScan(payload);
+    let words = wordsOf(norm);
+    if (cfg.blockPromptInjection and hasPattern(norm, INJECTION_PATTERNS)) { return ?("Prompt injection", "HIGH") };
+    if (cfg.blockDestructiveCommands and (hasPattern(norm, DESTRUCTIVE_PATTERNS) or hasWord(words, "mkfs"))) {
+      return ?("Destructive command", "CRITICAL");
+    };
+    if (cfg.blockPrivilegeEscalation and (hasPattern(norm, PRIVILEGE_PATTERNS) or hasWord(words, "sudo") or hasWord(words, "doas"))) {
+      return ?("Privilege escalation", "CRITICAL");
+    };
+    if (strict and hasPattern(norm, STRICT_PATTERNS)) { return ?("Prompt injection (strict)", "HIGH") };
+    null
+  };
+
+  private func previewText(t : Text, maxLen : Nat) : Text {
+    var out = "";
+    var n : Nat = 0;
     for (c in t.chars()) {
-      let code = Char.toNat32(c);
-      let normalized : Char =
-        if (code == 0x30) { 'o' }
-        else if (code == 0x31) { 'i' }
-        else if (code == 0x33) { 'e' }
-        else if (code == 0x34) { 'a' }
-        else if (code == 0x35) { 's' }
-        else if (code == 0x37) { 't' }
-        else if (code == 0x40) { 'a' }
-        else { c };
-      result #= Text.fromChar(normalized);
+      if (n >= maxLen) { return out };
+      out #= Text.fromChar(c);
+      n += 1;
     };
-    result
+    out
   };
 
-  private let DESTRUCTIVE_PATTERNS : [Text] = [
-    "rm -rf", "rm -fr", "rm -r -f", "rm -f -r",
-    "rm --recursive", "rm --force", "rm -rf /", "rm -rf ~",
-    "del /s", "del /q", "deltree", "rmdir /s",
-    "format c:", "mkfs.", " dd if=", " dd of=",
-    ">/dev/sda", ">/dev/nvme", "drop database", "drop table",
-    "truncate table", "shutdown -h", "shutdown now",
-    "shutdown /s", "reboot now", "init 0", "poweroff now",
-    ":(){:|:&};:"
-  ];
-
-  private let ON_DESTRUCTIVE_PATTERNS : [Text] = [
-    "delete from "
-  ];
-
-  private let INJECTION_PATTERNS : [Text] = [
-    "system override", "disregard all prior", "disregard all previous",
-    "ignore previous instructions", "ignore all previous", "jailbreak",
-    "dan mode", "do anything now", "bypass rules", "bypass safety",
-    "new instructions:"
-  ];
-
-  private let STRICT_INJECTION_PATTERNS : [Text] = [
-    "you are now", "pretend to be", "act as if", "roleplay as"
-  ];
-
-  private let PRIVILEGE_PATTERNS : [Text] = [
-    "sudo sh", "sudo bash", "sudo su", "sudo -i", "su root",
-    "chmod 777", "chown root", "/etc/passwd", "/etc/shadow", "/etc/sudoers",
-    "visudo", "reverse shell", " nc -e"
-  ];
-
-  private func scanForThreatsMedium(payload : Text) : ?(Text, Text) {
-    let normalized = normalizeForScan(payload);
-    let view = shellView(normalized);
-
-    if (securityRulesConfig.maxContextLength > 0 and Text.size(payload) > securityRulesConfig.maxContextLength) {
-      return ?("Context Overflow Blocked", "MEDIUM");
-    };
-
-    if (securityRulesConfig.blockPromptInjection) {
-      for (p in INJECTION_PATTERNS.vals()) {
-        if (hit(normalized, view, p)) {
-          return ?("Prompt Injection Blocked", "HIGH");
-        };
-      };
-    };
-
-    if (securityRulesConfig.blockDestructiveCommands) {
-      for (p in DESTRUCTIVE_PATTERNS.vals()) {
-        if (hit(normalized, view, p)) {
-          return ?("Destructive Command Blocked", "CRITICAL");
-        };
-      };
-    };
-
-    if (securityRulesConfig.blockPrivilegeEscalation) {
-      for (p in PRIVILEGE_PATTERNS.vals()) {
-        if (hit(normalized, view, p)) {
-          return ?("Privilege Escalation Blocked", "CRITICAL");
-        };
-      };
-      if (containsWord(view, "sudo")) {
-        return ?("Privilege Escalation Blocked", "CRITICAL");
-      };
-    };
-
-    null
+  private func logThreat(threatType : Text, severity : Text, snippet : Text) {
+    if (threatLog.size() >= MAX_THREAT_LOG) { ignore threatLog.remove(0) };
+    threatLog.add({ timestamp = Time.now(); threatType; severity; snippet });
+    totalBlocked += 1;
   };
 
-  private func scanForThreatsOn(payload : Text) : ?(Text, Text) {
-    var maxLen = securityRulesConfig.maxContextLength;
-    if (maxLen == 0 or maxLen > HARD_MAX_PROMPT) { maxLen := HARD_MAX_PROMPT };
-    if (maxLen > 4000) { maxLen := 4000 };
-
-    if (Text.size(payload) > maxLen) {
-      return ?("Context Overflow (Strict limit)", "HIGH");
-    };
-
-    switch (scanForThreatsMedium(payload)) {
-      case (?threat) { return ?threat };
-      case (null) {};
-    };
-
-    let normalized = normalizeForScan(payload);
-    let view = shellView(normalized);
-
-    if (securityRulesConfig.blockPromptInjection) {
-      for (p in STRICT_INJECTION_PATTERNS.vals()) {
-        if (hit(normalized, view, p)) {
-          return ?("Prompt Injection (Strict)", "HIGH");
-        };
-      };
-    };
-
-    for (p in ON_DESTRUCTIVE_PATTERNS.vals()) {
-      if (hit(normalized, view, p)) {
-        return ?("Destructive Command Blocked", "CRITICAL");
-      };
-    };
-
-    let deleeted = deleet(normalized);
-    let deleetedView = shellView(deleeted);
-
-    if (deleeted != normalized) {
-      for (p in INJECTION_PATTERNS.vals()) {
-        if (hit(deleeted, deleetedView, p)) {
-          return ?("Prompt Injection (Obfuscated)", "CRITICAL");
-        };
-      };
-      for (p in DESTRUCTIVE_PATTERNS.vals()) {
-        if (hit(deleeted, deleetedView, p)) {
-          return ?("Destructive Command (Obfuscated)", "CRITICAL");
-        };
-      };
-      for (p in ON_DESTRUCTIVE_PATTERNS.vals()) {
-        if (hit(deleeted, deleetedView, p)) {
-          return ?("Destructive Command (Obfuscated)", "CRITICAL");
-        };
-      };
-      for (p in PRIVILEGE_PATTERNS.vals()) {
-        if (hit(deleeted, deleetedView, p)) {
-          return ?("Privilege Escalation (Obfuscated)", "CRITICAL");
-        };
-      };
-      if (containsWord(deleetedView, "sudo")) {
-        return ?("Privilege Escalation (Obfuscated)", "CRITICAL");
-      };
-      for (p in STRICT_INJECTION_PATTERNS.vals()) {
-        if (hit(deleeted, deleetedView, p)) {
-          return ?("Prompt Injection (Obfuscated Strict)", "HIGH");
-        };
-      };
-    };
-
-    null
+  // ---------------------------------------------------------------- ownership & roles
+  // Step 1 (dfx, controller identity):  proposeMaster("<your II principal>")
+  // Step 2 (browser, that II principal): claimMasterPID("<same principal>")
+  public shared ({ caller }) func proposeMaster(pidText : Text) : async Text {
+    if (caller != installer and not isMaster(caller)) { Debug.trap("Unauthorized: installer or master only."); };
+    pendingMaster := ?parsePrincipal(pidText);
+    "Pending master set. That principal must now call claimMasterPID."
   };
 
-  private func getModeString() : Text {
-    switch (currentMode) {
-      case (#Off) { "OFF" };
-      case (#Medium) { "MEDIUM" };
-      case (#On) { "ON" };
-    }
-  };
-
-  private func enqueuePrompt(item : Text, submitter : Principal) : Nat {
-    let ticket = nextTicketId;
-    nextTicketId += 1;
-    promptsMap.put(ticket, item);
-    submittersMap.put(ticket, submitter);
-    promptQueueBuffer.add(ticket);
-    ticket
-  };
-
-  public query func getMasterPID() : async Text {
-    getMasterText()
-  };
-
-  public query func getDaemonPID() : async Text {
-    switch (daemonPrincipal) {
-      case (null) { "Unassigned" };
-      case (?p) { Principal.toText(p) };
-    }
-  };
-
-  public shared(msg) func claimMasterPID(pidText : Text) : async Text {
-    let caller = msg.caller;
-    if (Principal.isAnonymous(caller)) {
-      return "Error: Anonymous principals cannot claim master ownership.";
-    };
-    switch (masterPrincipal) {
-      case (?existing) {
-        return "Error: Master principal has already been claimed.";
-      };
-      case (null) {
+  public shared ({ caller }) func claimMasterPID(pidText : Text) : async Text {
+    assertNotAnonymous(caller);
+    if (pidText != Principal.toText(caller)) { return "Error: principal text does not match the caller." };
+    switch (pendingMaster) {
+      case (?p) {
+        if (p != caller) { return "Error: caller is not the proposed master." };
         masterPrincipal := ?caller;
-        return "Success! You are now the Master Principal of this canister.";
+        pendingMaster := null;
+        initStatus := #Initialized;
+        "Success: Master claimed securely."
       };
+      case null { "Error: no pending master. A controller must call proposeMaster first." };
     }
   };
 
-  public shared(msg) func setDaemonPrincipal(pidText : Text) : async Text {
-    if (not isAdminOrMaster(msg.caller)) {
-      return "Unauthorized: Admin/Master only.";
-    };
-    try {
-      daemonPrincipal := ?Principal.fromText(pidText);
-      return "Daemon principal authorized.";
-    } catch (_) {
-      return "Error: Invalid Principal format.";
-    };
+  public shared query ({ caller }) func isMasterClaimed() : async Bool {
+    switch (masterPrincipal) { case (?_) { true }; case null { false } }
   };
 
-  public query func checkIsAdmin(pidText : Text) : async Bool {
-    try {
-      let p = Principal.fromText(pidText);
-      isAdminOrMaster(p)
-    } catch (_) {
-      false
-    }
+  public shared query ({ caller }) func getRole() : async Text {
+    if (Principal.isAnonymous(caller)) { "anonymous" }
+    else if (isMaster(caller)) { "master" }
+    else if (isAdmin(caller)) { "admin" }
+    else if (isDaemon(caller)) { "daemon" }
+    else { "user" }
   };
 
-  public shared query(msg) func getAdmins() : async [Text] {
-    if (not isMaster(msg.caller)) {
-      return [];
-    };
-    let buf = Buffer.Buffer<Text>(adminPrincipals.size());
-    for (admin in adminPrincipals.vals()) {
-      buf.add(Principal.toText(admin));
-    };
-    Buffer.toArray(buf)
+  public shared ({ caller }) func setDaemonPrincipal(pidText : Text) : async Text {
+    if (not isAdminOrMaster(caller)) { Debug.trap("Unauthorized."); };
+    let p = parsePrincipal(pidText);
+    // separation of duties: the daemon principal must not also be an owner/admin
+    if (isAdminOrMaster(p)) { Debug.trap("Error: daemon principal must differ from master/admin principals."); };
+    daemonPrincipal := ?p;
+    "Daemon principal authorized."
   };
 
-  public shared(msg) func addAdmin(pidText : Text) : async Text {
-    if (not isMaster(msg.caller)) {
-      return "Unauthorized: Master only.";
-    };
-    try {
-      let p = Principal.fromText(pidText);
-      if (isAdminOrMaster(p)) {
-        return "Already an admin.";
-      };
-      let newAdmins = Buffer.Buffer<Principal>(adminPrincipals.size() + 1);
-      for (a in adminPrincipals.vals()) { newAdmins.add(a); };
-      newAdmins.add(p);
-      adminPrincipals := Buffer.toArray(newAdmins);
-      "Admin added successfully."
-    } catch (_) {
-      "Error: Invalid Principal format."
-    }
-  };
-
-  public shared(msg) func removeAdmin(pidText : Text) : async Text {
-    if (not isMaster(msg.caller)) {
-      return "Unauthorized: Master only.";
-    };
-    try {
-      let target = Principal.fromText(pidText);
-      let buf = Buffer.Buffer<Principal>(adminPrincipals.size());
-      for (admin in adminPrincipals.vals()) {
-        if (admin != target) {
-          buf.add(admin);
-        };
-      };
-      adminPrincipals := Buffer.toArray(buf);
-      "Admin revoked successfully."
-    } catch (_) {
-      "Error: Invalid Principal format."
-    }
-  };
-
-  public query func getSecurityRules() : async SecurityRulesConfig {
-    securityRulesConfig
-  };
-
-  public shared(msg) func updateSecurityRules(newConfig : SecurityRulesConfig) : async Text {
-    if (not isMaster(msg.caller)) {
-      return "Unauthorized: Master only.";
-    };
-    securityRulesConfig := newConfig;
-    "Security rules updated successfully."
-  };
-
-  public query func getStats() : async SystemStats {
-    let daemonText = switch (daemonPrincipal) {
-      case (null) { "Unassigned" };
-      case (?p) { Principal.toText(p) };
-    };
-
-    {
-      mode = getModeString();
-      totalProcessed;
-      totalBlocked;
-      activeQueueLength = promptQueueBuffer.size();
-      masterPid = getMasterText();
-      daemonPid = daemonText;
-      adminCount = adminPrincipals.size();
-    }
-  };
-
-  public shared(msg) func getPendingPrompt() : async ?PendingTask {
-    switch (daemonPrincipal) {
-      case (?d) {
-        if (msg.caller != d and not isAdminOrMaster(msg.caller)) {
-          return null;
-        };
-      };
-      case (null) {
-        if (not isAdminOrMaster(msg.caller)) {
-          return null;
-        }
-      };
-    };
-    
-    if (promptQueueBuffer.size() == 0) {
-      return null;
-    };
-
-    let ticket = promptQueueBuffer.get(0);
-    ignore promptQueueBuffer.remove(0);
-
-    switch (promptsMap.get(ticket)) {
-      case (null) { return null; };
-      case (?promptText) {
-        ignore promptsMap.remove(ticket);
-        return ?{ ticketId = ticket; prompt = promptText };
-      };
-    };
-  };
-
-  public shared(msg) func saveResult(ticket : Nat, result : Text) : async Text {
-    if (Text.size(result) > 64000) {
-      return "Error: Result exceeds 64KB maximum.";
-    };
-    switch (daemonPrincipal) {
-      case (?d) {
-        if (msg.caller != d and not isAdminOrMaster(msg.caller)) {
-          return "Unauthorized: Daemon/Admin only.";
-        };
-      };
-      case (null) {
-        if (not isAdminOrMaster(msg.caller)) {
-          return "Unauthorized: Daemon/Admin only.";
-        }
-      };
-    };
-    resultsMap.put(ticket, result);
-    resultTimestamps.put(ticket, Time.now());
-    return "Result Saved";
-  };
-
-  public shared query(msg) func checkResponse(ticket : Nat) : async ?Text {
-    let caller = msg.caller;
-    if (isAdminOrMaster(caller)) {
-      return resultsMap.get(ticket);
-    };
-    switch (submittersMap.get(ticket)) {
-      case (?submitter) {
-        if (submitter == caller) {
-          return resultsMap.get(ticket);
-        };
-      };
-      case (null) {};
-    };
-    null
-  };
-
-  public shared(msg) func setMode(newModeText : Text) : async Text {
-    if (not isAdminOrMaster(msg.caller)) {
-      return "Unauthorized: Admin/Master only.";
-    };
-    if (newModeText == "Off") {
-      currentMode := #Off;
-    } else if (newModeText == "On") {
-      currentMode := #On;
-    } else {
-      currentMode := #Medium;
-    };
+  public shared ({ caller }) func setMode(newModeText : Text) : async Text {
+    if (not isAdminOrMaster(caller)) { Debug.trap("Unauthorized."); };
+    if (newModeText == "Off") { currentMode := #Off }
+    else if (newModeText == "On") { currentMode := #On }
+    else if (newModeText == "Medium") { currentMode := #Medium }
+    else { Debug.trap("Error: Invalid firewall mode."); };
     "Mode updated."
   };
 
-  public shared(msg) func processPrompt(textBody : Text) : async PromptResult {
-    let caller = msg.caller;
-    if (Principal.isAnonymous(caller)) {
-      return {
-        allowed = false;
-        mode = getModeString();
-        response = "BLOCKED: Anonymous users cannot submit prompts.";
-        reason = "Anonymous Principal Denied";
-        ticketId = null;
-      };
+  public shared ({ caller }) func addAdmin(pidText : Text) : async Text {
+    if (not isMaster(caller)) { Debug.trap("Unauthorized: Master only."); };
+    let p = parsePrincipal(pidText);
+    if (isAdmin(p)) { return "Already an admin." };
+    if (isDaemon(p)) { Debug.trap("Error: the daemon principal cannot be an admin."); };
+    if (adminPrincipals.size() >= MAX_ADMINS) { Debug.trap("Admin limit reached."); };
+    adminPrincipals := Array.append(adminPrincipals, [p]);
+    "Admin added."
+  };
+
+  public shared ({ caller }) func removeAdmin(pidText : Text) : async Text {
+    if (not isMaster(caller)) { Debug.trap("Unauthorized: Master only."); };
+    let target = parsePrincipal(pidText);
+    adminPrincipals := Array.filter<Principal>(adminPrincipals, func (a : Principal) : Bool { a != target });
+    "Admin revoked."
+  };
+
+  public shared ({ caller }) func updateSecurityRules(newConfig : SecurityRulesConfig) : async Text {
+    if (not isMaster(caller)) { Debug.trap("Unauthorized: Master only."); };
+    if (newConfig.maxContextLength != 0 and (newConfig.maxContextLength < 500 or newConfig.maxContextLength > HARD_MAX_PROMPT)) {
+      Debug.trap("Error: maxContextLength must be 0 or between 500 and 20000.");
     };
-    let activeMode = getModeString();
-    let now = Time.now();
+    securityRulesConfig := newConfig;
+    "Security rules updated."
+  };
 
-    var maxLen = securityRulesConfig.maxContextLength;
-    if (maxLen == 0 or maxLen > HARD_MAX_PROMPT) { maxLen := HARD_MAX_PROMPT };
-    if (currentMode == #On and maxLen > 4000) { maxLen := 4000 };
+  public shared query func getSecurityRules() : async SecurityRulesConfig { securityRulesConfig };
 
-    if (Text.size(textBody) > maxLen) {
-      return {
-        allowed = false;
-        mode = activeMode;
-        response = "BLOCKED: Prompt exceeds maximum permitted context length.";
-        reason = "Context Overflow";
-        ticketId = null;
-      };
+  // ---------------------------------------------------------------- vetKeys
+  // Public (verification / IBE-encryption) key for context VETKD_CONTEXT. Free to call; cached.
+  public shared ({ caller }) func getVetKeyPublicKey() : async Blob {
+    assertNotAnonymous(caller);
+    switch (cachedVetKeyPublicKey) {
+      case (?pk) { return pk };
+      case null {};
     };
+    let res = await mgmt.vetkd_public_key({ canister_id = null; context = VETKD_CONTEXT; key_id = KEY_ID });
+    cachedVetKeyPublicKey := ?res.public_key;
+    res.public_key
+  };
 
-    if (now - lastPromptTime < 100_000_000) {
-      return {
-        allowed = false;
-        mode = activeMode;
-        response = "BLOCKED: Rate limited.";
-        reason = "Rate limit exceeded.";
-        ticketId = null;
+  private func checkTransportKey(k : Blob) {
+    if (Blob.toArray(k).size() != TRANSPORT_KEY_BYTES) { Debug.trap("Error: transport public key must be 48 bytes (BLS12-381 G1)."); };
+  };
+  private func requireCyclesFloor() {
+    if (Cycles.balance() < MIN_CYCLES_FLOOR) { Debug.trap("Error: canister cycle balance too low for key derivation."); };
+  };
+  private func bumpDerive(ticket : Nat) {
+    let n = switch (deriveCounts.get(ticket)) { case (?c) { c }; case null { 0 } };
+    if (n >= MAX_DERIVES_PER_TICKET) { Debug.trap("Error: key derivation limit reached for this ticket."); };
+    deriveCounts.put(ticket, n + 1);
+  };
+
+  private func daemonLeaseValid(ticket : Nat, lease : Nat) : Bool {
+    switch (ticketStates.get(ticket)) {
+      case (?#Processing(t, tok)) {
+        let isPrivate = switch (taskPayloads.get(ticket)) { case (?#Private(_)) { true }; case _ { false } };
+        tok == lease and (Time.now() - t) <= LEASE_TIMEOUT_NS and isPrivate
       };
-    };
+      case _ { false };
+    }
+  };
 
-    if (promptQueueBuffer.size() >= MAX_QUEUE_LIMIT) {
-      return {
-        allowed = false;
-        mode = activeMode;
-        response = "BLOCKED: System queue at maximum capacity.";
-        reason = "Capacity cap reached.";
-        ticketId = null;
-      };
-    };
+  // Daemon: key that decrypts the PROMPT of a ticket it currently holds a lease on.
+  public shared ({ caller }) func deriveDaemonKey(ticketId : Nat, leaseToken : Nat, transportPublicKey : Blob) : async Blob {
+    assertDaemon(caller);
+    checkTransportKey(transportPublicKey);
+    requireCyclesFloor();
+    if (not daemonLeaseValid(ticketId, leaseToken)) { Debug.trap("Error: ticket is not under a valid private lease."); };
+    bumpDerive(ticketId);
+    Cycles.add<system>(VETKD_DERIVE_CYCLES);
+    let res = await mgmt.vetkd_derive_key({
+      input = ticketIdentity(KIND_PROMPT, ticketId);
+      context = VETKD_CONTEXT;
+      transport_public_key = transportPublicKey;
+      key_id = KEY_ID;
+    });
+    if (not daemonLeaseValid(ticketId, leaseToken)) { Debug.trap("Error: lease changed during derivation."); };
+    res.encrypted_key
+  };
 
-    lastPromptTime := now;
+  // Submitter: key that decrypts the RESULT of their own completed private ticket.
+  public shared ({ caller }) func deriveResultKey(ticketId : Nat, transportPublicKey : Blob) : async Blob {
+    assertNotAnonymous(caller);
+    checkTransportKey(transportPublicKey);
+    requireCyclesFloor();
+    let owner = switch (submittersMap.get(ticketId)) { case (?s) { s == caller }; case null { false } };
+    let completed = switch (ticketStates.get(ticketId)) { case (?#Completed) { true }; case _ { false } };
+    let isPrivate = switch (privateTickets.get(ticketId)) { case (?_) { true }; case null { false } };
+    if (not (owner and completed and isPrivate)) { Debug.trap("Error: not your completed private ticket."); };
+    bumpDerive(ticketId);
+    Cycles.add<system>(VETKD_DERIVE_CYCLES);
+    let res = await mgmt.vetkd_derive_key({
+      input = ticketIdentity(KIND_RESULT, ticketId);
+      context = VETKD_CONTEXT;
+      transport_public_key = transportPublicKey;
+      key_id = KEY_ID;
+    });
+    res.encrypted_key
+  };
+
+  // ---------------------------------------------------------------- private tickets
+  public shared ({ caller }) func reservePrivateTicket() : async Nat {
+    assertNotAnonymous(caller);
+    if (currentMode == #On) { Debug.trap("Error: firewall is in lockdown (mode On); private tickets are disabled."); };
+    if (not enforceRateLimit(caller)) { Debug.trap("Rate limited."); };
+    if (Iter.size(resultsMap.entries()) + reservedResultCount >= MAX_RETAINED_RESULTS or
+        (currentRetainedBytes + currentReservedBytes + EXPECTED_MAX_RESPONSE_BYTES) > MAX_RETAINED_BYTES) {
+      Debug.trap("Error: result storage capacity reached.");
+    };
+    if (getCount(principalReservationCounts, caller) >= MAX_PRINCIPAL_RESERVATIONS or
+        getCount(principalActive, caller) >= MAX_PRINCIPAL_ACTIVE or
+        activeReservationCount >= MAX_GLOBAL_RESERVATIONS or
+        activeTicketsCount >= MAX_ACTIVE_TICKETS or
+        promptQueue.size() + activeReservedPrivateTicketsCount >= MAX_QUEUE_LIMIT) {
+      Debug.trap("Error: reservation quota or queue capacity reached.");
+    };
+    let tid = nextTicketId;
+    nextTicketId += 1;
+    submittersMap.put(tid, caller);
+    ticketStates.put(tid, #Reserved);
+    reservationTimestamps.put(tid, Time.now());
+    ticketResRecords.put(tid, {
+      owner = caller; queueSlotReserved = true; resultCapacityReserved = true;
+      bytesReserved = EXPECTED_MAX_RESPONSE_BYTES; principalQuotaReserved = true;
+      activeCounted = true; released = false;
+    });
+    currentReservedBytes += EXPECTED_MAX_RESPONSE_BYTES;
+    reservedResultCount += 1;
+    activeReservedPrivateTicketsCount += 1;
+    activeReservationCount += 1;
+    activeTicketsCount += 1;
+    incMap(principalReservationCounts, caller);
+    incMap(principalActive, caller);
+    tid
+  };
+
+  public shared ({ caller }) func submitPrivate(ticketId : Nat, ciphertext : Blob) : async PromptResult {
+    let mode = modeName(currentMode);
+    if (currentMode == #On) { return deny(mode, "lockdown: private tickets are disabled", "Lockdown") };
+    let rec = switch (ticketResRecords.get(ticketId)) {
+      case (?r) { r };
+      case null { Debug.trap("Error: ticket does not exist."); };
+    };
+    if (rec.owner != caller) { Debug.trap("Unauthorized owner."); };
+    if (rec.released or not rec.queueSlotReserved or not rec.principalQuotaReserved) { Debug.trap("Error: reservation no longer valid."); };
+    switch (ticketStates.get(ticketId)) { case (?#Reserved) {}; case _ { Debug.trap("Error: invalid ticket state."); } };
+    switch (reservationTimestamps.get(ticketId)) {
+      case (?t) { if (Time.now() - t > RESERVATION_TTL_NS) { Debug.trap("Error: reservation expired."); } };
+      case null { Debug.trap("Error: missing reservation timestamp."); };
+    };
+    let size = Blob.toArray(ciphertext).size();
+    if (size == 0 or size > MAX_CIPHERTEXT_BYTES) { Debug.trap("Error: ciphertext size out of range."); };
+    if (promptQueue.size() >= MAX_QUEUE_LIMIT) { Debug.trap("Error: queue full."); };
+
+    // the reserved slot becomes a real queue entry; the per-principal reservation is released
+    activeReservedPrivateTicketsCount := sub(activeReservedPrivateTicketsCount, 1);
+    decMap(principalReservationCounts, caller);
+    activeReservationCount := sub(activeReservationCount, 1);
+    ticketResRecords.put(ticketId, { rec with queueSlotReserved = false; principalQuotaReserved = false });
+    taskPayloads.put(ticketId, #Private(ciphertext));
+    privateTickets.put(ticketId, true);
+    ticketStates.put(ticketId, #Submitted);
+    promptQueue.add(ticketId);
     totalProcessed += 1;
+    { allowed = true; mode; response = "QUEUED"; reason = "Private ticket stored; not scanned by the canister"; ticketId = ?ticketId }
+  };
 
-    switch (currentMode) {
-      case (#On) {
-        switch (scanForThreatsOn(textBody)) {
-          case (?(threat, severity)) {
-            logThreat(threat, severity, previewText(textBody, 40));
-            {
-              allowed = false;
-              mode = activeMode;
-              response = "BLOCKED: " # threat;
-              reason = threat;
-              ticketId = null;
-            }
-          };
-          case (null) {
-            let tid = enqueuePrompt(textBody, caller);
-            {
-              allowed = true;
-              mode = activeMode;
-              response = "QUEUED: Prompt forwarded to authenticated daemon queue.";
-              reason = "Passed strict heuristic filters.";
-              ticketId = ?tid;
-            }
-          };
-        }
+  // ---------------------------------------------------------------- inspected prompts
+  public shared ({ caller }) func processPrompt(textBody : Text) : async PromptResult {
+    let mode = modeName(currentMode);
+    if (Principal.isAnonymous(caller)) { return deny(mode, "anonymous callers are not allowed", "Anonymous") };
+    if (not enforceRateLimit(caller)) { return deny(mode, "rate limited", "Rate Limit") };
+    if (Blob.toArray(Text.encodeUtf8(textBody)).size() > HARD_MAX_PROMPT) { return deny(mode, "prompt exceeds the hard size limit", "Size Limit") };
+    if (Iter.size(resultsMap.entries()) + reservedResultCount >= MAX_RETAINED_RESULTS or
+        (currentRetainedBytes + currentReservedBytes + EXPECTED_MAX_RESPONSE_BYTES) > MAX_RETAINED_BYTES) {
+      return deny(mode, "result storage capacity reached", "Capacity");
+    };
+    if (promptQueue.size() + activeReservedPrivateTicketsCount >= MAX_QUEUE_LIMIT or
+        activeTicketsCount >= MAX_ACTIVE_TICKETS or
+        getCount(principalActive, caller) >= MAX_PRINCIPAL_ACTIVE) {
+      return deny(mode, "queue or per-user limit reached", "Capacity");
+    };
+
+    let scan = switch (currentMode) {
+      case (#On) { scanForThreats(textBody, true) };
+      case (#Medium) { scanForThreats(textBody, false) };
+      case (#Off) { null };
+    };
+    switch (scan) {
+      case (?(threat, severity)) {
+        logThreat(threat, severity, previewText(textBody, 40));
+        return deny(mode, threat, threat);
       };
-      case (#Medium) {
-        switch (scanForThreatsMedium(textBody)) {
-          case (?(threat, severity)) {
-            logThreat(threat, severity, previewText(textBody, 40));
-            {
-              allowed = false;
-              mode = activeMode;
-              response = "BLOCKED: " # threat;
-              reason = threat;
-              ticketId = null;
-            }
+      case null {};
+    };
+
+    let tid = nextTicketId;
+    nextTicketId += 1;
+    submittersMap.put(tid, caller);
+    ticketStates.put(tid, #Submitted);
+    taskPayloads.put(tid, #Inspected(textBody));
+    ticketResRecords.put(tid, {
+      owner = caller; queueSlotReserved = false; resultCapacityReserved = true;
+      bytesReserved = EXPECTED_MAX_RESPONSE_BYTES; principalQuotaReserved = false;
+      activeCounted = true; released = false;
+    });
+    currentReservedBytes += EXPECTED_MAX_RESPONSE_BYTES;
+    reservedResultCount += 1;
+    activeTicketsCount += 1;
+    incMap(principalActive, caller);
+    promptQueue.add(tid);
+    totalProcessed += 1;
+    { allowed = true; mode; response = "QUEUED"; reason = "Passed heuristic scan"; ticketId = ?tid }
+  };
+
+  // ---------------------------------------------------------------- daemon API (lease protocol)
+  public shared ({ caller }) func getPendingPrompt() : async ?PendingTask {
+    assertDaemon(caller);
+    while (promptQueue.size() > 0) {
+      let ticket = promptQueue.get(0);
+      ignore promptQueue.remove(0);
+      let submitted = switch (ticketStates.get(ticket)) { case (?#Submitted) { true }; case _ { false } };
+      if (submitted) {
+        switch (taskPayloads.get(ticket)) {
+          case (?payload) {
+            let token = nextLeaseCounter;
+            nextLeaseCounter += 1;
+            let att = switch (attemptCounts.get(ticket)) { case (?a) { a + 1 }; case null { 1 } };
+            attemptCounts.put(ticket, att);
+            ticketStates.put(ticket, #Processing(Time.now(), token));
+            return ?{ ticketId = ticket; taskType = payload; leaseToken = token; attemptCount = att };
           };
-          case (null) {
-            let tid = enqueuePrompt(textBody, caller);
-            {
-              allowed = true;
-              mode = activeMode;
-              response = "QUEUED: Prompt forwarded to authenticated daemon queue.";
-              reason = "Passed security heuristic filters.";
-              ticketId = ?tid;
-            }
-          };
-        }
+          case null { finishTicket(ticket, #DeadLetter) };
+        };
       };
-      case (#Off) {
-        let tid = enqueuePrompt(textBody, caller);
-        {
-          allowed = true;
-          mode = activeMode;
-          response = "QUEUED: Prompt forwarded to authenticated daemon queue.";
-          reason = "Firewall posture disabled.";
-          ticketId = ?tid;
-        }
+    };
+    null
+  };
+
+  private func leaseCheck(ticket : Nat, lease : Nat) : ?Text {
+    switch (ticketStates.get(ticket)) {
+      case (?#Processing(t, tok)) {
+        if (tok != lease) { return ?"Error: stale lease token." };
+        if (Time.now() - t > LEASE_TIMEOUT_NS) { return ?"Error: lease expired." };
+        null
       };
+      case _ { ?"Error: ticket is not under lease." };
     }
   };
 
-  public shared query(msg) func getThreats() : async [ThreatEvent] {
-    if (not isMaster(msg.caller)) {
-      return [];
+  private func saveResultInternal(caller : Principal, ticket : Nat, lease : Nat, responseText : Text, expectPrivate : Bool) : Text {
+    assertDaemon(caller);
+    switch (leaseCheck(ticket, lease)) { case (?err) { return err }; case null {} };
+    let isPrivate = switch (taskPayloads.get(ticket)) {
+      case (?#Private(_)) { true };
+      case (?#Inspected(_)) { false };
+      case null { return "Error: task payload missing." };
     };
-    let buf = Buffer.Buffer<ThreatEvent>(threatLog.size());
-    for (item in threatLog.vals()) {
-      switch (item) {
-        case (?event) { buf.add(event); };
-        case (null) {};
+    if (isPrivate != expectPrivate) { return "Error: task type mismatch." };
+    let size = Blob.toArray(Text.encodeUtf8(responseText)).size();
+    if (size > EXPECTED_MAX_RESPONSE_BYTES) { return "Error: result exceeds 64 KB." };
+    if (currentRetainedBytes + size > MAX_RETAINED_BYTES) { return "Error: global result storage full." };
+
+    let now = Time.now();
+    resultsMap.put(ticket, responseText);
+    resultTimestamps.put(ticket, now);
+    currentRetainedBytes += size;
+    ticketStates.put(ticket, #Completed);
+    terminalTimestamps.put(ticket, now);
+    ignore taskPayloads.remove(ticket);
+    ignore attemptCounts.remove(ticket);
+    releaseReservation(ticket);
+    "Saved"
+  };
+
+  public shared ({ caller }) func savePrivateResult(ticket : Nat, leaseToken : Nat, sealedResult : Text) : async Text {
+    saveResultInternal(caller, ticket, leaseToken, sealedResult, true)
+  };
+  public shared ({ caller }) func saveInspectedResult(ticket : Nat, leaseToken : Nat, plaintextResponse : Text) : async Text {
+    saveResultInternal(caller, ticket, leaseToken, plaintextResponse, false)
+  };
+
+  // The daemon reports a failed attempt instead of storing a fake "success".
+  public shared ({ caller }) func reportFailure(ticket : Nat, leaseToken : Nat, reason : Text) : async Text {
+    assertDaemon(caller);
+    switch (leaseCheck(ticket, leaseToken)) { case (?err) { return err }; case null {} };
+    retryOrDead(ticket);
+    "Failure recorded."
+  };
+
+  private func retryOrDead(ticket : Nat) {
+    let att = switch (attemptCounts.get(ticket)) { case (?a) { a }; case null { 1 } };
+    if (att >= MAX_RETRY_COUNT) {
+      finishTicket(ticket, #DeadLetter);
+    } else {
+      ticketStates.put(ticket, #Submitted);
+      if (not queueContains(ticket)) { promptQueue.add(ticket) };
+    };
+  };
+
+  // ---------------------------------------------------------------- reads
+  public shared query ({ caller }) func checkResponse(ticket : Nat) : async ?Text {
+    switch (submittersMap.get(ticket)) {
+      case (?s) { if (s == caller) { return resultsMap.get(ticket) } };
+      case null {};
+    };
+    null
+  };
+
+  public shared query ({ caller }) func getTicketStatus(ticket : Nat) : async ?Text {
+    switch (submittersMap.get(ticket)) {
+      case (?s) {
+        if (s != caller) { return null };
+        switch (ticketStates.get(ticket)) {
+          case (?#Reserved) { ?"reserved" };
+          case (?#Submitted) { ?"queued" };
+          case (?#Processing(_, _)) { ?"processing" };
+          case (?#Completed) { ?"completed" };
+          case (?#DeadLetter) { ?"failed" };
+          case (?#Expired) { ?"expired" };
+          case null { null };
+        }
+      };
+      case null { null };
+    }
+  };
+
+  public query func getStats() : async SystemStats {
+    {
+      mode = modeName(currentMode);
+      totalProcessed; totalBlocked;
+      activeQueueLength = promptQueue.size();
+      adminCount = adminPrincipals.size();
+      masterPid = "Restricted"; daemonPid = "Restricted";
+    }
+  };
+
+  public shared query ({ caller }) func checkIsAdmin(pidText : Text) : async Bool {
+    if (not isAdminOrMaster(caller)) { return false };
+    isAdminOrMaster(Principal.fromText(pidText))
+  };
+
+  public shared query ({ caller }) func getAdmins() : async [Text] {
+    if (not isMaster(caller)) { return [] };
+    Array.map<Principal, Text>(adminPrincipals, func (p : Principal) : Text { Principal.toText(p) })
+  };
+
+  public shared query ({ caller }) func getMasterPID() : async Text {
+    if (not isAdminOrMaster(caller)) { return "Unauthorized" };
+    switch (masterPrincipal) { case (?p) { Principal.toText(p) }; case null { "Unassigned" } }
+  };
+
+  public shared query ({ caller }) func getDaemonPID() : async Text {
+    if (not isAdminOrMaster(caller)) { return "Unauthorized" };
+    switch (daemonPrincipal) { case (?p) { Principal.toText(p) }; case null { "Unassigned" } }
+  };
+
+  public shared query ({ caller }) func getThreats() : async [ThreatEvent] {
+    if (not isAdminOrMaster(caller)) { return [] };
+    Buffer.toArray(threatLog)
+  };
+
+  // ---------------------------------------------------------------- cleanup
+  private func tombstoneExpired(ticket : Nat, now : Int) : Bool {
+    switch (terminalTimestamps.get(ticket)) {
+      case (?t) { now - t > TOMBSTONE_TTL_NS };
+      case null { terminalTimestamps.put(ticket, now); false };
+    }
+  };
+
+  private func runCleanup() {
+    let now = Time.now();
+    let expiredRes = Buffer.Buffer<Nat>(8);
+    let timedOut = Buffer.Buffer<Nat>(8);
+    let expiredResults = Buffer.Buffer<Nat>(8);
+    let purge = Buffer.Buffer<Nat>(8);
+
+    for ((ticket, state) in ticketStates.entries()) {
+      switch (state) {
+        case (#Reserved) {
+          let fresh = switch (reservationTimestamps.get(ticket)) { case (?t) { now - t <= RESERVATION_TTL_NS }; case null { false } };
+          if (not fresh) { expiredRes.add(ticket) };
+        };
+        case (#Processing(t, _)) { if (now - t > LEASE_TIMEOUT_NS) { timedOut.add(ticket) } };
+        case (#Completed) {
+          switch (resultTimestamps.get(ticket)) {
+            case (?t) { if (now - t > RESULT_TTL_NS) { expiredResults.add(ticket) } };
+            case null { expiredResults.add(ticket) };
+          };
+        };
+        case (#Expired) { if (tombstoneExpired(ticket, now)) { purge.add(ticket) } };
+        case (#DeadLetter) { if (tombstoneExpired(ticket, now)) { purge.add(ticket) } };
+        case (#Submitted) {};
       };
     };
-    Buffer.toArray(buf)
+
+    for (t in expiredRes.vals()) { finishTicket(t, #Expired) };
+    for (t in timedOut.vals()) { retryOrDead(t) };
+    for (t in expiredResults.vals()) {
+      switch (resultsMap.remove(t)) {
+        case (?txt) { currentRetainedBytes := sub(currentRetainedBytes, Blob.toArray(Text.encodeUtf8(txt)).size()) };
+        case null {};
+      };
+      ignore resultTimestamps.remove(t);
+      ticketStates.put(t, #Expired);
+      terminalTimestamps.put(t, now);
+    };
+    for (t in purge.vals()) {
+      ignore ticketStates.remove(t);
+      ignore terminalTimestamps.remove(t);
+      ignore submittersMap.remove(t);
+      ignore attemptCounts.remove(t);
+      ignore taskPayloads.remove(t);
+      ignore reservationTimestamps.remove(t);
+      ignore resultTimestamps.remove(t);
+      ignore ticketResRecords.remove(t);
+      ignore privateTickets.remove(t);
+      ignore deriveCounts.remove(t);
+      switch (resultsMap.remove(t)) {
+        case (?txt) { currentRetainedBytes := sub(currentRetainedBytes, Blob.toArray(Text.encodeUtf8(txt)).size()) };
+        case null {};
+      };
+    };
   };
 
-  public query func http_request(req : HttpRequest) : async HttpResponse {
-    { status_code = 404; headers = [("Access-Control-Allow-Origin", "*")]; body = Text.encodeUtf8("Not Found"); upgrade = ?false }
+  // ---------------------------------------------------------------- upgrade hooks
+  system func preupgrade() {
+    stableQueue := Buffer.toArray(promptQueue);
+    stableTicketStates := dump(ticketStates);
+    stableTimestamps := dump(reservationTimestamps);
+    stableResultTimestamps := dump(resultTimestamps);
+    stableTerminalTimestamps := dump(terminalTimestamps);
+    stableAttemptCounts := dump(attemptCounts);
+    stableTaskPayloads := dump(taskPayloads);
+    stableResults := dump(resultsMap);
+    stableSubmitters := dump(submittersMap);
+    stableTicketResRecords := dump(ticketResRecords);
+    stableRateLimits := dump(principalRateLimits);
+    stablePrincipalResCounts := dump(principalReservationCounts);
+    stableThreatLogData := Buffer.toArray(threatLog);
+    stablePrivateTickets := Array.map<(Nat, Bool), Nat>(dump(privateTickets), func (e : (Nat, Bool)) : Nat { e.0 });
   };
 
-  public shared func http_request_update(req : HttpRequest) : async HttpResponse {
-    { status_code = 404; headers = [("Access-Control-Allow-Origin", "*")]; body = Text.encodeUtf8("Not Found"); upgrade = ?false }
+  system func postupgrade() {
+    load(ticketStates, stableTicketStates);
+    load(reservationTimestamps, stableTimestamps);
+    load(resultTimestamps, stableResultTimestamps);
+    load(terminalTimestamps, stableTerminalTimestamps);
+    load(attemptCounts, stableAttemptCounts);
+    load(taskPayloads, stableTaskPayloads);
+    load(resultsMap, stableResults);
+    load(submittersMap, stableSubmitters);
+    load(ticketResRecords, stableTicketResRecords);
+    load(principalRateLimits, stableRateLimits);
+    rateLimitEntries := Iter.size(principalRateLimits.entries());
+    for (t in stablePrivateTickets.vals()) { privateTickets.put(t, true) };
+    for (ev in stableThreatLogData.vals()) { threatLog.add(ev) };
+
+    cachedVetKeyPublicKey := null;
+    isFetchingVetKey := false;
+    if (initStatus == #Initializing) { initStatus := #Uninitialized };
+    switch (masterPrincipal) { case (?_) { initStatus := #Initialized }; case null {} };
+
+    var rb : Nat = 0; var rc : Nat = 0; var arc : Nat = 0; var atc : Nat = 0; var aprq : Nat = 0;
+    for ((_, rec) in ticketResRecords.entries()) {
+      if (not rec.released) {
+        rb += rec.bytesReserved;
+        if (rec.resultCapacityReserved) { rc += 1 };
+        if (rec.queueSlotReserved) { aprq += 1 };
+        if (rec.principalQuotaReserved) { arc += 1; incMap(principalReservationCounts, rec.owner) };
+        if (rec.activeCounted) { atc += 1; incMap(principalActive, rec.owner) };
+      };
+    };
+    currentReservedBytes := rb;
+    reservedResultCount := rc;
+    activeReservationCount := arc;
+    activeTicketsCount := atc;
+    activeReservedPrivateTicketsCount := aprq;
+    var retained : Nat = 0;
+    for ((_, txt) in resultsMap.entries()) { retained += Blob.toArray(Text.encodeUtf8(txt)).size() };
+    currentRetainedBytes := retained;
+
+    let broken = Buffer.Buffer<Nat>(4);
+    for ((t, st) in ticketStates.entries()) {
+      switch (st) {
+        case (#Submitted) {
+          switch (taskPayloads.get(t)) {
+            case (?_) { promptQueue.add(t) };
+            case null { broken.add(t) };
+          };
+        };
+        case _ {};
+      };
+    };
+    for (t in broken.vals()) { finishTicket(t, #DeadLetter) };
+
+    stableQueue := []; stableTicketStates := []; stableTimestamps := []; stableResultTimestamps := [];
+    stableTerminalTimestamps := []; stableAttemptCounts := []; stableTaskPayloads := []; stableResults := [];
+    stableSubmitters := []; stableTicketResRecords := []; stableRateLimits := []; stablePrincipalResCounts := [];
+    stableThreatLogData := []; stablePrivateTickets := []; stableTransportKeys := [];
   };
 
-  cleanupTimerId := ?Timer.recurringTimer<system>(
-    #seconds 3600,
-    func () : async () {
-      runCleanup();
-    }
+  private let _cleanupTimer : Timer.TimerId = Timer.recurringTimer<system>(
+    #seconds 300,
+    func () : async () { runCleanup() }
   );
 };

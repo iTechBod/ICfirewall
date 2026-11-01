@@ -1,0 +1,45 @@
+// Reference only. `dfx build` generates the authoritative file from main.mo:
+//   dfx build relay_backend && cp .dfx/ic/canisters/relay_backend/relay_backend.did src/relay_backend/
+type SystemStats = record {
+  mode : text; totalProcessed : nat; totalBlocked : nat; activeQueueLength : nat;
+  adminCount : nat; masterPid : text; daemonPid : text;
+};
+type PromptResult = record { allowed : bool; mode : text; response : text; reason : text; ticketId : opt nat };
+type SecurityRulesConfig = record {
+  blockPromptInjection : bool; blockDestructiveCommands : bool;
+  blockPrivilegeEscalation : bool; maxContextLength : nat;
+};
+type TaskType = variant { Inspected : text; Private : blob };
+type PendingTask = record { ticketId : nat; taskType : TaskType; leaseToken : nat; attemptCount : nat };
+type ThreatEvent = record { timestamp : int; threatType : text; severity : text; snippet : text };
+
+service : () -> {
+  addAdmin : (text) -> (text);
+  checkIsAdmin : (text) -> (bool) query;
+  checkResponse : (nat) -> (opt text) query;
+  claimMasterPID : (text) -> (text);
+  deriveDaemonKey : (nat, nat, blob) -> (blob);
+  deriveResultKey : (nat, blob) -> (blob);
+  getAdmins : () -> (vec text) query;
+  getDaemonPID : () -> (text) query;
+  getMasterPID : () -> (text) query;
+  getPendingPrompt : () -> (opt PendingTask);
+  getRole : () -> (text) query;
+  getSecurityRules : () -> (SecurityRulesConfig) query;
+  getStats : () -> (SystemStats) query;
+  getThreats : () -> (vec ThreatEvent) query;
+  getTicketStatus : (nat) -> (opt text) query;
+  getVetKeyPublicKey : () -> (blob);
+  isMasterClaimed : () -> (bool) query;
+  processPrompt : (text) -> (PromptResult);
+  proposeMaster : (text) -> (text);
+  removeAdmin : (text) -> (text);
+  reportFailure : (nat, nat, text) -> (text);
+  reservePrivateTicket : () -> (nat);
+  saveInspectedResult : (nat, nat, text) -> (text);
+  savePrivateResult : (nat, nat, text) -> (text);
+  setDaemonPrincipal : (text) -> (text);
+  setMode : (text) -> (text);
+  submitPrivate : (nat, blob) -> (PromptResult);
+  updateSecurityRules : (SecurityRulesConfig) -> (text);
+}

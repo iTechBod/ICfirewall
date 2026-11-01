@@ -1,0 +1,9 @@
+{
+  "name": "icfirewall-vetkeys-helper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@icp-sdk/vetkeys": "^0.7.0"
+  }
+}

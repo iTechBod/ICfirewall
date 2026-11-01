@@ -1,116 +1,147 @@
 # 🛡️ ICfirewall
 
-> On-chain AI prompt firewall, end-to-end encryption vault, and command center for the Internet Computer
+> On-chain AI prompt firewall, Full Identity-Based Encryption (IBE) vault, and command center for the Internet Computer
 
-ICfirewall is an advanced decentralized perimeter canister that sits between client interfaces (web UI, iOS Shortcuts, etc.) and a local AI inference engine. It inspects incoming prompts, enforces heuristic security guardrails, manages cryptographic keys via **vetKDS (Verifiable Encrypted Threshold Key Derivation)**, secures message channels with client-side **AES-GCM End-to-End Encryption (E2EE)**, and queues safe payloads for a local background daemon to execute.
+ICfirewall is an advanced decentralized perimeter canister that sits between client interfaces (web UI, iOS Shortcuts, etc.) and a local AI inference engine. It inspects incoming prompts, enforces heuristic security guardrails, manages cryptographic keys via **vetKDS (Verifiable Encrypted Threshold Key Derivation)**, secures message channels with **Full Identity-Based Encryption (IBE)**, and queues safe payloads for a local background daemon to execute.
 
-It is a personal project and has **not** been formally security-audited.
-
----
-
-## Key Features & v7.0 Updates
-
-- **End-to-End Encryption (E2EE)**: Prompts are encrypted client-side using Web Crypto AES-GCM session keys before crossing the network boundary, ensuring complete transport privacy.
-- **vetKDS (Verifiable Encrypted Threshold Key Derivation) Integration**: Leverages ICP’s native subnet threshold system API (`vet_keys_public_key`) to manage decentralized master key derivation on-chain.
-- **Mops Package Manager Support**: Integrated via `mops.toml` and `dfx.json` packtool rules for robust Motoko dependency resolution.
-- **Three Runtime Security Modes** (`Off` / `Medium` / `On`) with dynamic state-switching.
-- **On-chain Heuristic Threat Scanning**:
-  - Full-width character folding & zero-width character stripping
-  - Whitespace normalization & shell-view deobfuscation
-  - Basic leetspeak decoding & pattern detection for prompt injection, destructive commands, and privilege escalation strings.
-- **Granular Access Control**: Managed via Master, Admin, and Daemon principals.
-- **Fail-Closed Queue & Sizing Caps**: 200 pending prompt queue limit with hard character constraints (2,0000 char max, forced to 4,000 in `On` mode).
-- **Local Python Daemon (`poll_llm.py`)**: Automatically unpacks E2EE payloads, coordinates with local LLMs (Odysseus, Ollama, etc.), and securely saves encrypted results back to the canister.
+It is an experimental personal project and has **not** been formally security-audited.
 
 ---
 
-## Project Structure
+## Key Features & Updates
+
+- **Full Identity-Based Encryption (IBE) & vetKDS**: Messages and prompt results are encrypted directly against ticket identities (`identity = kind || ticketId`) using the ICP canister's threshold master public key (`vetkd_public_key`). No client public keys are stored on-chain.
+- **Two-Step Master Principal Bootstrap**: Prevents front-running during deployment. The installer controller proposes a master principal (`proposeMaster`), which must then be claimed explicitly by that II user (`claimMasterPID`).
+- **Cryptographic Separation of Duties**: 
+  - `deriveDaemonKey`: Only the authorized `icf-daemon` principal can derive prompt-decryption keys for active leased tasks.
+  - `deriveResultKey`: Only the ticket submitter principal can derive decryption keys for their completed private results.
+- **Dynamic Runtime Security Modes** (`Off` / `Medium` / `On` Lockdown):
+  - In `#On` (Lockdown) mode, private (unscannable) tickets are strictly refused, forcing all inputs through on-chain heuristic scanning.
+- **On-chain Heuristic Threat Scanner**:
+  - Zero-width character & unicode bidi stripping (`NFKC` normalization)
+  - Whitespace collapsing & token-aware leetspeak deobfuscation
+  - Pattern matching for prompt injections, destructive commands (`rm -rf`, `mkfs`), and privilege escalation (`sudo`, `chmod 777`).
+- **Saturating Accounting & Resource Protection**:
+  - Non-trapping saturating reservation math for bytes and queue slots.
+  - Cycles floor guards (`60_000_000_000` cycles) and hard per-ticket derivation limits (`MAX_DERIVES_PER_TICKET = 4`) to eliminate cycles-drain vulnerabilities.
+- **Local Python Daemon (`mac_daemon/poll_llm.py`)**:
+  - Interactive startup wizard that retrieves active `dfx` principals, prompts for canister controller setup, saves `canister_ids.json`, and handles native Odysseus session authentication.
+
+---
+
+## Project Architecture & Flow
 
 ```text
 .
 ├── src/
 │   ├── relay_backend/
-│   │   └── main.mo          # Motoko canister (with vetKDS & threat inspection)
+│   │   └── main.mo          # v8.8 Motoko canister (IBE, vetKDS, state preservation)
 │   └── relay_frontend/
-│       ├── index.html       # Web UI command center & vetKDS vault card
-│       ├── main.js          # E2EE session cryptography & canister connector
-│       └── styles.css       # Dark glass-style UI styles
+│       ├── index.html       # Web UI command center & vetKDS vault panel
+│       ├── main.ts          # TypeScript client (AuthClient, IBE decryption, polling)
+│       ├── crypto.ts        # Client-side IBE & Transport Secret Key primitives
+│       └── styles.css       # Dynamic glassmorphism dark theme styles
 ├── mac_daemon/
-│   └── poll_llm.py          # Local Python E2EE poller + Setup Wizard
-├── mops.toml                # Motoko package manager dependency config
-├── mops.lock                # Locked dependency versions
-├── dfx.json                 # DFX configuration with Mops packtool integration
-├── requirements.txt         # Python dependencies
+│   ├── poll_llm.py          # Python background daemon + automated setup wizard
+│   └── vetkeys_helper/
+│       └── crypto_helper.mjs# Node.js BLS12-381 / vetKeys crypto helper bridge
+├── mops.toml                # Motoko package manager dependencies
+├── mops.lock                # Locked Motoko dependency manifest
+├── dfx.json                 # DFX deployment configuration (assets build pipeline)
+├── requirements.txt         # Python daemon dependencies
 └── README.md
 
-Architecture Flow
-[ Web UI / Client ] ──(AES-GCM E2EE Ciphertext)──> [ ICP Canister ]
-                                                          │
-                                            1. Check caller permissions
-                                            2. Inspect threat patterns
-                                            3. Queue or reject payload
-                                                          │
-                                                          ▼
-[ Local Python Daemon ] <──(Polls & Decrypts)── [ Canister Queue ]
+Data Flow
+[ Web UI / Client ] ──(IBE Encrypted Ciphertext)──> [ ICP Canister (relay_backend) ]
+                                                            │
+                                              1. Validate role & rate limit
+                                              2. Check mode (Off/Medium/On)
+                                              3. Heuristic threat inspection
+                                              4. Queue task & lease state
+                                                            │
+                                                            ▼
+[ Local Python Daemon ] <──(Poll & IBE Key Derive)── [ Canister Queue ]
          │
          ▼
-  [ Local AI LLM ]
+[ Native Odysseus / Ollama LLM ]
+         │
+         ▼
+[ Local Python Daemon ] ──(Sealed IBE Result)──> [ ICP Canister ] ──> [ Client Decrypts via vetKDS ]
 ```
 Quick Start & Setup Guide
 1. Prerequisites
  * DFX SDK (0.24.3+)
+ * Node.js (v18+) & npm
  * Mops (Motoko package manager)
  * Python 3.10+
- * A local LLM or agent endpoint (Odysseus, Ollama, etc.)
- * Internet Identity (for Master / Admin actions)
-2. Initialize Packages (Mops)
-Ensure your Motoko dependencies are synchronized locally using Mops:
-mops i
-
-(This downloads required dependencies and sets up the project based on mops.toml).
-3. Deploy the Canister
-Start your local replica or target the Internet Computer mainnet:
-# Local replica deployment
+ * A local LLM engine (Odysseus, Ollama, etc.)
+ * Internet Identity (for Master / Admin authentication)
+2. Initialize Dependencies
+Install Motoko and Python packages:
+# Install Motoko dependencies
+```text
+mops install
+```
+# Install Python daemon dependencies
+```text
+pip install -r requirements.txt
+```
+3. Deploy Canisters
+Local Replica Deployment
 ```text
 dfx start --background --clean
 dfx deploy
 ```
-# Mainnet deployment
+
+Internet Computer Mainnet Deployment
 ```text
 dfx deploy --network ic
 ```
-4. Claim Master Ownership & Set Daemon Principal
-After deploying, authorize your principal as the Master Owner:
-dfx canister call relay_backend claimMasterPID '("YOUR_PRINCIPAL_ID")'
 
-Configure your local daemon principal so it has permissions to pull tasks:
-dfx canister call relay_backend setDaemonPrincipal '("DAEMON_PRINCIPAL_ID")'
-
-Setting Up and Using vetKDS (Threshold Keys)
-ICfirewall integrates with Internet Computer's vetKDS feature to derive threshold cryptographic parameters directly from the subnet:
- * Subnet Support: Ensure your network/subnet supports the vet_keys_public_key management canister binding (test_key_1 is typically enabled on local replicas and supported subnets).
- * Web UI Vault Card: In the Web UI Command Center, navigate to the AES-GCM & vetKDS Cryptographic Vault panel.
- * Fetching Public Keys: Click "Fetch vetKDS Public Key". The frontend queries the backend canister, which securely communicates with the system management canister (aaaaa-aa) to retrieve the threshold public key.
- * Verification: The hex-encoded public key is displayed directly in your dashboard vault card for cryptographic operations and secure payload routing.
-Running the Local Daemon
-The local daemon (mac_daemon/poll_llm.py) manages background polling, client-side cryptographic decryption/encryption, and local LLM completions:
- * Install Python dependencies:
-```text
-   pip install -r requirements.txt
-```
- * Run the daemon setup wizard:
+Access Control & Master Ownership
+ICfirewall uses a two-step claim process to prevent identity hijacking upon canister initialization:
+ * Propose Master (Executed via DFX controller identity):
  ```text
-   python3 mac_daemon/poll_llm.py
+   dfx canister call relay_backend proposeMaster '("YOUR_INTERNET_IDENTITY_PRINCIPAL")'
 ```
- * Follow the interactive setup prompts to link your backend canister ID, active DFX identity, and local LLM endpoint configuration (odysseus_config.json).
+
+ * Claim Master PID (Executed from the Web UI or via the proposed identity):
+   Log in to the Web UI using Internet Identity and click "Claim Master PID Now" in the initialization panel.
+ * Authorize Daemon Principal:
+   In the Master Admin Studio panel on the Web UI (or via DFX), authorize your daemon's principal:
+   ```text
+   dfx canister call relay_backend setDaemonPrincipal '("DAEMON_PRINCIPAL_ID")'
+```
+
+vetKDS & Full IBE Operations
+ICfirewall leverages the Internet Computer's native threshold key derivation system (aaaaa-aa management canister):
+ * Key Retrieval: Click "Fetch vetKDS Public Key" in the Web UI Cryptographic Vault panel to cache the system master public key (BLS12-381 G2).
+ * Identity-Based Encryption:
+   * Prompts and results are encrypted against a deterministic 9-byte identity: kind (1 byte) || ticketId (8 bytes BE).
+   * Private prompts use kind = 1.
+   * Sealed prompt results use kind = 2.
+ * Derivation Restrictions: Key derivation requires a minimum canister balance floor (60_000_000_000 cycles) and is capped at 4 derivations per ticket.
+Running the Local Daemon
+The local daemon (mac_daemon/poll_llm.py) coordinates background polling, prompt decryption, model inference, and encrypted result saving:
+```text
+python3 mac_daemon/poll_llm.py
+```
+
+Interactive Setup Wizard
+On startup, poll_llm.py automatically:
+ * Runs dfx identity get-principal for the configured identity (icf-daemon).
+ * Prompts you to enter your Backend and Frontend canister IDs.
+ * Automatically updates and persists canister_ids.json in the project root.
+ * Authenticates against your local Odysseus/Ollama LLM instance and stores configuration in odysseus_config.json.
 Security Modes
-| Mode | Behavior Description |
+| Mode | Behavior & Security Posture |
 |---|---|
-| Off | No security filtering. All incoming encrypted prompts are queued immediately. |
-| Medium | Normalization, character folding, and pattern checks against injection, destructive commands, and privilege escalation strings. |
-| On | Maximum security: strict character limits (max 4,000), advanced leetspeak filters, shell-view verification, and full heuristics blockades. |
+| Off | Uncensored. Heuristic checks are bypassed. Queues all incoming prompts immediately. |
+| Medium | Guarded (Default). Performs normalization, zero-width stripping, and pattern checks for prompt injections, destructive system commands, and privilege escalation. |
+| On | Lockdown. Strict inspection enabled. Private (unscannable) tickets are strictly disabled, forcing all inputs through canister-side inspection. |
 Support & Links
  * Creator Hub: https://2n2uw-uaaaa-aaaag-at2hq-cai.icp.net
 Disclaimer
-This is a personal experimental project featuring cutting-edge E2EE and threshold cryptography elements. Do not use it as a standalone security boundary for critical production workloads without an independent formal security audit.
+This is a personal experimental project featuring cutting-edge Identity-Based Encryption and threshold cryptography elements. Do not use it as a standalone security boundary for critical production workloads without an independent formal security audit.
 
+Built with <3 on the Internet Computer Protocol $ICP.
